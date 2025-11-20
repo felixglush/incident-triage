@@ -1,0 +1,16 @@
+# ML inference service dependencies
+
+# FastAPI for ML service
+fastapi==0.121.3
+uvicorn==0.38.0
+pydantic==2.12.4
+
+# ML and transformers
+# For M4 Mac compatibility, install PyTorch first separately:
+# pip install torch==2.9.1
+transformers==4.57.1
+torch==2.9.1
+sentence-transformers==5.1.2
+
+# HTTP client
+requests==2.32.5
