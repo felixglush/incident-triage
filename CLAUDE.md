@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+When exiting plan mode to begin implementation, ALWAYS save the implementation plan first as a markdown file in @docs/
+
+
 ## Project Overview
 
 **OpsRelay** is an AI-powered incident management system that automatically triages alerts from monitoring platforms (Datadog, Sentry, etc.), groups them into incidents, and provides intelligent assistance to on-call engineers through RAG-based copilot features.

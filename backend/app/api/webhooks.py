@@ -14,6 +14,7 @@ from app.services.signature_verification import (
     verify_sentry_signature
 )
 from app.services.webhook_processor import WebhookProcessor
+from app.workers.tasks import process_alert
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +66,9 @@ async def datadog_webhook(request: Request, db: Session = Depends(get_db)):
     try:
         alert = processor.process_datadog_webhook(payload)
 
-        # TODO (Phase 1 Week 3): Queue for async processing
-        # from app.workers.tasks import process_alert
-        # process_alert.delay(alert.id)
+        # Queue alert for async ML processing
+        process_alert.delay(alert.id)
+        logger.debug(f"Alert {alert.id} queued for processing")
 
         logger.info(f"Datadog webhook processed: alert_id={alert.id}")
 
@@ -132,9 +133,9 @@ async def sentry_webhook(request: Request, db: Session = Depends(get_db)):
     try:
         alert = processor.process_sentry_webhook(payload)
 
-        # TODO (Phase 1 Week 3): Queue for async processing
-        # from app.workers.tasks import process_alert
-        # process_alert.delay(alert.id)
+        # Queue alert for async ML processing
+        process_alert.delay(alert.id)
+        logger.debug(f"Alert {alert.id} queued for processing")
 
         logger.info(f"Sentry webhook processed: alert_id={alert.id}")
 
