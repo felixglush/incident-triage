@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: password
     ports:
-      - "5432:5432"
+      - "54322:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
@@ -37,6 +37,7 @@ services:
       ML_SERVICE_URL: http://ml-service:8001
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      SKIP_SIGNATURE_VERIFICATION: "true"  # Development only - disable in production!
     depends_on:
       postgres:
         condition: service_healthy
