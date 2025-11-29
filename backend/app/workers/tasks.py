@@ -3,19 +3,26 @@ Celery task implementations for OpsRelay.
 
 This module defines background tasks that are executed by Celery workers.
 Key responsibilities:
-- Alert classification (stub for Phase 1, real ML in Phase 2)
-- Entity extraction (stub for Phase 1, real NER in Phase 2)
+- Alert classification using ML inference service
+- Entity extraction using NER models
 - Alert grouping into incidents
 - Incident metadata management
 """
 import logging
+import os
 from datetime import datetime, timedelta, timezone
+
+import requests
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.workers.celery_app import celery_app
 from app.database import SessionLocal
 from app.models.database import Alert, Incident, IncidentAction, SeverityLevel, IncidentStatus, ActionType
 
 logger = logging.getLogger(__name__)
+
+# ML service URL from environment
+ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8001")
 
 
 @celery_app.task(bind=True, max_retries=3)
@@ -51,17 +58,59 @@ def process_alert(self, alert_id: int):
 
         logger.info(f"Processing alert {alert_id}: {alert.title}")
 
-        # Phase 1: Stub classification
-        # In Phase 2, this will call ML inference service for real classification
-        alert.severity = SeverityLevel.WARNING
-        alert.predicted_team = "backend"
-        alert.confidence_score = 0.75
+        # Prepare text for ML classification (combine title + message)
+        text = f"{alert.title}. {alert.message or ''}"
 
-        # Phase 1: Stub entity extraction
-        # In Phase 2, this will call NER model for entity extraction
-        alert.service_name = "api-service"
-        alert.environment = "production"
-        alert.region = "us-east-1"
+        # Call ML service for classification with defensive error handling
+        try:
+            response = requests.post(
+                f"{ML_SERVICE_URL}/classify",
+                json={"text": text},
+                timeout=5  # 5 second timeout to prevent worker hanging
+            )
+            response.raise_for_status()
+            classification = response.json()
+
+            # Map ML service response to database enums
+            severity_str = classification["severity"].upper()
+            alert.severity = SeverityLevel[severity_str]
+            alert.predicted_team = classification["team"]
+            alert.confidence_score = classification["confidence"]
+
+            logger.info(
+                f"ML classification: severity={severity_str}, team={classification['team']}, "
+                f"confidence={classification['confidence']:.2f}"
+            )
+
+        except (requests.RequestException, KeyError, ValueError) as e:
+            logger.error(f"ML classification failed for alert {alert_id}: {str(e)}")
+            # Graceful degradation: use safe defaults
+            alert.severity = SeverityLevel.WARNING
+            alert.predicted_team = "backend"
+            alert.confidence_score = 0.0
+            logger.warning(f"Using fallback classification for alert {alert_id}")
+
+        # Call ML service for entity extraction
+        try:
+            response = requests.post(
+                f"{ML_SERVICE_URL}/extract-entities",
+                json={"text": text},
+                timeout=5
+            )
+            response.raise_for_status()
+            entities = response.json()
+
+            alert.service_name = entities.get("service_name")
+            alert.environment = entities.get("environment")
+            alert.region = entities.get("region")
+            alert.error_code = entities.get("error_code")
+
+            logger.debug(f"Extracted entities: {entities}")
+
+        except (requests.RequestException, KeyError) as e:
+            logger.error(f"Entity extraction failed for alert {alert_id}: {str(e)}")
+            # Continue without entities - not critical for alert processing
+            pass
 
         db.commit()
         logger.debug(f"Alert {alert_id} classified: severity={alert.severity}, team={alert.predicted_team}")
@@ -142,6 +191,8 @@ def group_alerts_into_incidents(db, alert: Alert) -> int:
 
             if alert.service_name and alert.service_name not in incident.affected_services:
                 incident.affected_services.append(alert.service_name)
+                # Mark JSONB field as modified so SQLAlchemy detects the change
+                flag_modified(incident, "affected_services")
 
             db.commit()
 
