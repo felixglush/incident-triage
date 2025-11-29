@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  postgres-test:
+    image: pgvector/pgvector:pg18  # Same as production - PostgreSQL 18 with pgvector
+    container_name: opsrelay-postgres-test
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: opsrelay_test
+    ports:
+      - "54323:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d opsrelay_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres-test-data:/var/lib/postgresql
+
+  redis-test:
+    image: redis:8.4.0  # Same as production
+    container_name: opsrelay-redis-test
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres-test-data:
