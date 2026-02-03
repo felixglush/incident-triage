@@ -108,7 +108,6 @@ def process_alert(self, alert_id: int):
             alert.region = entities.get("region")
             alert.error_code = entities.get("error_code")
             alert.entity_source = entities.get("entity_source") or "regex"
-
             entity_sources = {}
             if alert.service_name:
                 entity_sources["service_name"] = "ml"
