@@ -76,6 +76,7 @@ def process_alert(self, alert_id: int):
             alert.severity = SeverityLevel[severity_str]
             alert.predicted_team = classification["team"]
             alert.confidence_score = classification["confidence"]
+            alert.classification_source = "rule"
 
             logger.info(
                 f"ML classification: severity={severity_str}, team={classification['team']}, "
@@ -88,6 +89,7 @@ def process_alert(self, alert_id: int):
             alert.severity = SeverityLevel.WARNING
             alert.predicted_team = "backend"
             alert.confidence_score = 0.0
+            alert.classification_source = "fallback_rule"
             logger.warning(f"Using fallback classification for alert {alert_id}")
 
         # Call ML service for entity extraction
@@ -104,13 +106,19 @@ def process_alert(self, alert_id: int):
             alert.environment = entities.get("environment")
             alert.region = entities.get("region")
             alert.error_code = entities.get("error_code")
+            alert.entity_source = entities.get("entity_source") or "regex"
 
             logger.debug(f"Extracted entities: {entities}")
+
+            # Fill any missing entity fields from tags and mark provenance
+            if _apply_fallback_entities(alert):
+                alert.entity_source = "tags"
 
         except (requests.RequestException, KeyError) as e:
             logger.error(f"Entity extraction failed for alert {alert_id}: {str(e)}")
             # Fallback: best-effort extraction from raw payload tags
-            _apply_fallback_entities(alert)
+            if _apply_fallback_entities(alert):
+                alert.entity_source = "tags"
 
         db.commit()
         logger.debug(f"Alert {alert_id} classified: severity={alert.severity}, team={alert.predicted_team}")
@@ -141,12 +149,13 @@ def process_alert(self, alert_id: int):
         db.close()
 
 
-def _apply_fallback_entities(alert: Alert) -> None:
+def _apply_fallback_entities(alert: Alert) -> bool:
     """
     Best-effort entity extraction from raw payload when ML service is unavailable.
     """
     payload = alert.raw_payload or {}
     tags = payload.get("tags") or []
+    updated = False
 
     # Tags usually look like ["service:api", "env:production", "region:us-east-1"]
     if isinstance(tags, list):
@@ -155,12 +164,16 @@ def _apply_fallback_entities(alert: Alert) -> None:
                 continue
             if tag.startswith("service:") and not alert.service_name:
                 alert.service_name = tag.split(":", 1)[1]
+                updated = True
             elif tag.startswith("env:") and not alert.environment:
                 alert.environment = tag.split(":", 1)[1]
+                updated = True
             elif tag.startswith("region:") and not alert.region:
                 alert.region = tag.split(":", 1)[1]
+                updated = True
             elif tag.startswith("error:") and not alert.error_code:
                 alert.error_code = tag.split(":", 1)[1]
+                updated = True
 
     # If no tags, try minimal inference from title
     if not alert.service_name and alert.title:
@@ -168,7 +181,10 @@ def _apply_fallback_entities(alert: Alert) -> None:
         for candidate in ["api", "db", "cache", "queue", "worker"]:
             if candidate in lowered:
                 alert.service_name = candidate
+                updated = True
                 break
+
+    return updated
 
 
 def group_alerts_into_incidents(db, alert: Alert) -> int:
