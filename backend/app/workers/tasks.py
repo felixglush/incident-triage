@@ -18,6 +18,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.workers.celery_app import celery_app
 from app.database import SessionLocal
 from app.models.database import Alert, Incident, IncidentAction, SeverityLevel, IncidentStatus, ActionType
+from app.services.incident_similarity import ensure_incident_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,18 @@ def process_alert(self, alert_id: int):
 
         # Group alert into incident
         incident_id = group_alerts_into_incidents(db, alert)
+
+        # Update incident embedding after grouping
+        incident = db.query(Incident).filter(Incident.id == incident_id).first()
+        if incident:
+            alerts = (
+                db.query(Alert)
+                .filter(Alert.incident_id == incident.id)
+                .order_by(Alert.alert_timestamp.desc())
+                .all()
+            )
+            ensure_incident_embedding(db, incident, alerts)
+            db.commit()
 
         logger.info(f"Alert {alert_id} processed successfully, incident_id={incident_id}")
 

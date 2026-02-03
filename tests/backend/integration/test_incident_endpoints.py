@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.models import Incident, Alert, IncidentAction, IncidentStatus, SeverityLevel, ActionType
+from app.models import Incident, Alert, IncidentAction, IncidentStatus, SeverityLevel, ActionType, RunbookChunk
 
 
 @pytest.mark.integration
@@ -110,6 +110,38 @@ class TestIncidentEndpoints:
         actions = db_session.query(IncidentAction).filter(IncidentAction.incident_id == incident.id).all()
         assert len(actions) >= 1
 
+    def test_get_similar_incidents(self, test_client, db_session):
+        incident = Incident(
+            title="Database outage",
+            severity=SeverityLevel.CRITICAL,
+            status=IncidentStatus.OPEN,
+            assigned_team="platform",
+            affected_services=["db"],
+        )
+        similar = Incident(
+            title="Database connection errors",
+            severity=SeverityLevel.CRITICAL,
+            status=IncidentStatus.OPEN,
+            assigned_team="platform",
+            affected_services=["db"],
+        )
+        dissimilar = Incident(
+            title="Frontend layout regression",
+            severity=SeverityLevel.WARNING,
+            status=IncidentStatus.OPEN,
+            assigned_team="frontend",
+            affected_services=["ui"],
+        )
+        db_session.add_all([incident, similar, dissimilar])
+        db_session.commit()
+
+        response = test_client.get(f"/incidents/{incident.id}/similar")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] >= 1
+        assert any(item["id"] == similar.id for item in data["items"])
+        assert not any(item["id"] == dissimilar.id for item in data["items"])
+
 
 @pytest.mark.integration
 class TestAlertEndpoints:
@@ -153,3 +185,50 @@ class TestAlertEndpoints:
         data = response.json()
         assert data["total"] == 1
         assert data["items"][0]["external_id"] == "alert-4"
+
+
+@pytest.mark.integration
+class TestIncidentSummaries:
+    def test_summarize_incident_cached(self, test_client, db_session):
+        incident = Incident(
+            title="Queue backlog",
+            severity=SeverityLevel.ERROR,
+            status=IncidentStatus.OPEN,
+            assigned_team="backend",
+            affected_services=["queue"],
+        )
+        db_session.add(incident)
+        db_session.flush()
+
+        alert = Alert(
+            external_id="alert-summary-1",
+            source="datadog",
+            title="Queue depth high",
+            message="",
+            raw_payload={"id": "alert-summary-1", "tags": ["service:queue", "env:production"]},
+            alert_timestamp=datetime.now(timezone.utc),
+            incident_id=incident.id,
+        )
+        db_session.add(alert)
+
+        runbook = RunbookChunk(
+            source_document="queue-runbook.md",
+            chunk_index=0,
+            title="Queue Troubleshooting",
+            content="Check worker health and backlog depth.",
+            doc_metadata={"tags": ["queue"]},
+        )
+        db_session.add(runbook)
+        db_session.commit()
+
+        first = test_client.post(f"/incidents/{incident.id}/summarize")
+        assert first.status_code == 200
+        payload = first.json()
+        assert payload["cached"] is False
+        citations = payload["citations"]
+        assert any(cite["type"] == "alert" for cite in citations)
+
+        second = test_client.post(f"/incidents/{incident.id}/summarize")
+        assert second.status_code == 200
+        cached_payload = second.json()
+        assert cached_payload["cached"] is True
