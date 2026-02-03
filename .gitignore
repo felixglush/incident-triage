@@ -209,6 +209,7 @@ __marimo__/
 # Node
 node_modules/
 .next/
+frontend/.next/
 
 # Models
 ml/models/*.bin
