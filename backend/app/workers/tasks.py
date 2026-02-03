@@ -211,7 +211,6 @@ def _summarize_entity_source(entity_sources: dict) -> str:
         return unique_sources.pop()
     return "mixed"
 
-
 def group_alerts_into_incidents(db, alert: Alert) -> int:
     """
     Group alert into incident based on time window and similarity.
