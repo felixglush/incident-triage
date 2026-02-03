@@ -16,6 +16,8 @@ from app.services.incident_query import (
     clamp_limit,
     incident_aggregates_subquery,
 )
+from app.services.incident_similarity import find_similar_incidents
+from app.services.incident_summaries import summarize_incident
 
 router = APIRouter()
 
@@ -37,6 +39,8 @@ def serialize_incident(incident: Incident, alert_count: Optional[int], last_aler
         "assigned_team": incident.assigned_team,
         "assigned_user": incident.assigned_user,
         "summary": incident.summary,
+        "summary_citations": incident.summary_citations,
+        "next_steps": incident.next_steps,
         "affected_services": incident.affected_services or [],
         "created_at": incident.created_at.isoformat() if incident.created_at else None,
         "updated_at": incident.updated_at.isoformat() if incident.updated_at else None,
@@ -187,6 +191,102 @@ def get_incident(incident_id: int, db: Session = Depends(get_db)):
         "incident": serialize_incident(incident, alert_count, last_alert_at),
         "alerts": [serialize_alert(alert) for alert in alerts],
         "actions": [serialize_action(action) for action in actions],
+    }
+
+
+@router.get("/{incident_id}/similar")
+def get_similar_incidents(
+    incident_id: int,
+    limit: int = 5,
+    min_score: float = 0.1,
+    db: Session = Depends(get_db),
+):
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    alerts = (
+        db.query(Alert)
+        .filter(Alert.incident_id == incident.id)
+        .order_by(Alert.alert_timestamp.desc())
+        .all()
+    )
+
+    matches = find_similar_incidents(db, incident, alerts, limit=limit, min_score=min_score)
+
+    items = []
+    for item in matches:
+        match = item["incident"]
+        items.append({
+            "id": match.id,
+            "title": match.title,
+            "status": match.status.value,
+            "severity": match.severity.value,
+            "assigned_team": match.assigned_team,
+            "score": round(item["score"], 3),
+        })
+
+    return {
+        "items": items,
+        "total": len(items),
+        "limit": limit,
+    }
+
+
+@router.post("/{incident_id}/summarize")
+def summarize_incident_endpoint(
+    incident_id: int,
+    limit_similar: int = 5,
+    limit_runbook: int = 5,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    if incident.summary and incident.next_steps and not force:
+        aggregates = incident_aggregates_subquery(db)
+        row = (
+            db.query(Incident, aggregates.c.alert_count, aggregates.c.last_alert_at)
+            .outerjoin(aggregates, Incident.id == aggregates.c.incident_id)
+            .filter(Incident.id == incident.id)
+            .first()
+        )
+        incident_row, alert_count, last_alert_at = row
+        return {
+            "incident": serialize_incident(incident_row, alert_count, last_alert_at),
+            "summary": incident_row.summary,
+            "citations": incident_row.summary_citations or [],
+            "next_steps": incident_row.next_steps or [],
+            "cached": True,
+        }
+
+    try:
+        result = summarize_incident(
+            db,
+            incident_id,
+            limit_similar=limit_similar,
+            limit_runbook=limit_runbook,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    aggregates = incident_aggregates_subquery(db)
+    row = (
+        db.query(Incident, aggregates.c.alert_count, aggregates.c.last_alert_at)
+        .outerjoin(aggregates, Incident.id == aggregates.c.incident_id)
+        .filter(Incident.id == incident_id)
+        .first()
+    )
+    incident_row, alert_count, last_alert_at = row
+
+    return {
+        "incident": serialize_incident(incident_row, alert_count, last_alert_at),
+        "summary": result["summary"],
+        "citations": result["citations"],
+        "next_steps": result["next_steps"],
+        "cached": False,
     }
 
 
