@@ -179,7 +179,7 @@ def _classify_team(text: str) -> tuple[str, float]:
         return "frontend", 0.85
 
     # Default to backend
-    return "backend", 0.6
+    return "backend", 0.7
 
 
 # Entity extraction endpoint

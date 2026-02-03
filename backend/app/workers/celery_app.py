@@ -44,4 +44,11 @@ celery_app.conf.update(
     worker_max_tasks_per_child=1000,  # Recycle worker after N tasks
 )
 
+# Enable eager mode for tests if configured via env
+if os.getenv("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true":
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = os.getenv(
+        "CELERY_TASK_EAGER_PROPAGATES", "true"
+    ).lower() == "true"
+
 logger.info(f"Celery configured with broker: {REDIS_URL}")

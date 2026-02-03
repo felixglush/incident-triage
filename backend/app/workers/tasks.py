@@ -109,8 +109,8 @@ def process_alert(self, alert_id: int):
 
         except (requests.RequestException, KeyError) as e:
             logger.error(f"Entity extraction failed for alert {alert_id}: {str(e)}")
-            # Continue without entities - not critical for alert processing
-            pass
+            # Fallback: best-effort extraction from raw payload tags
+            _apply_fallback_entities(alert)
 
         db.commit()
         logger.debug(f"Alert {alert_id} classified: severity={alert.severity}, team={alert.predicted_team}")
@@ -139,6 +139,36 @@ def process_alert(self, alert_id: int):
 
     finally:
         db.close()
+
+
+def _apply_fallback_entities(alert: Alert) -> None:
+    """
+    Best-effort entity extraction from raw payload when ML service is unavailable.
+    """
+    payload = alert.raw_payload or {}
+    tags = payload.get("tags") or []
+
+    # Tags usually look like ["service:api", "env:production", "region:us-east-1"]
+    if isinstance(tags, list):
+        for tag in tags:
+            if not isinstance(tag, str):
+                continue
+            if tag.startswith("service:") and not alert.service_name:
+                alert.service_name = tag.split(":", 1)[1]
+            elif tag.startswith("env:") and not alert.environment:
+                alert.environment = tag.split(":", 1)[1]
+            elif tag.startswith("region:") and not alert.region:
+                alert.region = tag.split(":", 1)[1]
+            elif tag.startswith("error:") and not alert.error_code:
+                alert.error_code = tag.split(":", 1)[1]
+
+    # If no tags, try minimal inference from title
+    if not alert.service_name and alert.title:
+        lowered = alert.title.lower()
+        for candidate in ["api", "db", "cache", "queue", "worker"]:
+            if candidate in lowered:
+                alert.service_name = candidate
+                break
 
 
 def group_alerts_into_incidents(db, alert: Alert) -> int:
