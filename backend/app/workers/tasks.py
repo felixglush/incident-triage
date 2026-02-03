@@ -106,6 +106,7 @@ def process_alert(self, alert_id: int):
             alert.environment = entities.get("environment")
             alert.region = entities.get("region")
             alert.error_code = entities.get("error_code")
+            alert.entity_source = entities.get("entity_source") or "regex"
 
             entity_sources = {}
             if alert.service_name:
@@ -201,7 +202,6 @@ def _apply_fallback_entities(alert: Alert, entity_sources: dict) -> dict:
                 break
 
     return updated
-
 
 def _summarize_entity_source(entity_sources: dict) -> str:
     if not entity_sources:
