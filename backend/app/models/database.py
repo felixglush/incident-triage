@@ -96,12 +96,14 @@ class Alert(Base):
     severity = Column(Enum(SeverityLevel), index=True)
     predicted_team = Column(String(100), index=True)
     confidence_score = Column(Float)
+    classification_source = Column(String(50), index=True)
 
     # Extracted entities from NER
     service_name = Column(String(200), index=True)
     environment = Column(String(50), index=True)
     region = Column(String(50))
     error_code = Column(String(100))
+    entity_source = Column(String(50), index=True)
 
     # Soft delete flag
     deleted_at = Column(DateTime(timezone=True))
