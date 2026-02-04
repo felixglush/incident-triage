@@ -9,6 +9,8 @@ from .database import (
     SeverityLevel,
     IncidentStatus,
     ActionType,
+    Connector,
+    ConnectorStatus,
 )
 
 __all__ = [
@@ -20,4 +22,6 @@ __all__ = [
     "SeverityLevel",
     "IncidentStatus",
     "ActionType",
+    "Connector",
+    "ConnectorStatus",
 ]

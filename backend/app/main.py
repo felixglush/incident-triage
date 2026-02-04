@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import check_connection
 from app.api import webhooks
-from app.api import incidents, alerts
+from app.api import incidents, alerts, dashboard, runbooks, connectors
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,9 @@ app.add_middleware(
 app.include_router(webhooks.router, prefix="/webhook", tags=["webhooks"])
 app.include_router(incidents.router, prefix="/incidents", tags=["incidents"])
 app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
+app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
+app.include_router(runbooks.router, prefix="/runbooks", tags=["runbooks"])
+app.include_router(connectors.router, prefix="/connectors", tags=["connectors"])
 # TODO: Add more routers as we implement them
 # app.include_router(chat.router, prefix="/chat", tags=["chat"])
 
