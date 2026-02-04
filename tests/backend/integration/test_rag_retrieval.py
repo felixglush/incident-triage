@@ -65,3 +65,34 @@ class TestRagRetrieval:
         query = "queue backlog"
         results = find_similar_runbook_chunks(db_session, embed_text(query), query, limit=5)
         assert all(item["chunk"].source == "runbooks" for item in results)
+
+    def test_rerank_boosts_title_match(self, db_session):
+        content = "Pool usage is high and nearing saturation."
+        db_session.add(
+            RunbookChunk(
+                source_document="pooling.md",
+                chunk_index=0,
+                source="runbooks",
+                title="Pooling instructions",
+                content=content,
+                embedding=embed_text(content),
+                doc_metadata={"tags": ["db"]},
+            )
+        )
+        db_session.add(
+            RunbookChunk(
+                source_document="scaling.md",
+                chunk_index=0,
+                source="runbooks",
+                title="Scaling notes",
+                content=content,
+                embedding=embed_text(content),
+                doc_metadata={"tags": ["db"]},
+            )
+        )
+        db_session.commit()
+
+        query = "pool"
+        results = find_similar_runbook_chunks(db_session, embed_text(query), query, limit=2)
+        assert results
+        assert results[0]["chunk"].title == "Pooling instructions"
