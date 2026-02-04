@@ -18,9 +18,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 # Ensure env vars are set before importing app modules
-os.environ.setdefault(
-    "DATABASE_URL", "postgresql://user:password@localhost:54323/opsrelay_test"
-)
+test_database_url = os.getenv("TEST_DATABASE_URL")
+if test_database_url:
+    os.environ["DATABASE_URL"] = test_database_url
+else:
+    os.environ.setdefault(
+        "DATABASE_URL", "postgresql://user:password@localhost:54323/opsrelay_test"
+    )
 os.environ.setdefault("REDIS_URL", "redis://localhost:6380/0")
 os.environ.setdefault("SKIP_SIGNATURE_VERIFICATION", "true")
 os.environ.setdefault("CELERY_TASK_ALWAYS_EAGER", "true")
