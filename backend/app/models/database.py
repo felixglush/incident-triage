@@ -371,6 +371,8 @@ class RunbookChunk(Base):
     # Document source tracking
     source_document = Column(String(500), nullable=False, index=True)
     chunk_index = Column(Integer, nullable=False)
+    source = Column(String(50), nullable=False, default="runbooks", index=True)
+    source_uri = Column(String(500))
 
     # Content
     title = Column(String(500))
@@ -396,7 +398,7 @@ class RunbookChunk(Base):
     # Table-level constraints and indexes
     __table_args__ = (
         # Unique constraint to prevent duplicate chunks
-        UniqueConstraint("source_document", "chunk_index", name="uq_runbook_doc_chunk"),
+        UniqueConstraint("source_document", "chunk_index", "source", name="uq_runbook_doc_chunk"),
 
         # Index for ordering chunks within a document
         Index("ix_runbook_source_index", "source_document", "chunk_index"),

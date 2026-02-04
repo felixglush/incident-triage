@@ -41,7 +41,10 @@ def ensure_incident_embedding(db: Session, incident: Incident, alerts: List[Aler
 
 
 def ensure_runbook_embeddings(db: Session) -> None:
-    chunks = db.query(RunbookChunk).filter(RunbookChunk.embedding.is_(None)).all()
+    chunks = db.query(RunbookChunk).filter(
+        RunbookChunk.embedding.is_(None),
+        RunbookChunk.source == "runbooks",
+    ).all()
     for chunk in chunks:
         text = " ".join([chunk.title or "", chunk.content or ""]).strip()
         chunk.embedding = embed_text(text)
@@ -166,7 +169,7 @@ def find_similar_runbook_chunks(
             distance = RunbookChunk.embedding.l2_distance(query_embedding)
             rows = (
                 db.query(RunbookChunk, distance.label("distance"))
-                .filter(RunbookChunk.embedding.isnot(None))
+                .filter(RunbookChunk.embedding.isnot(None), RunbookChunk.source == "runbooks")
                 .order_by(distance.asc())
                 .limit(limit)
                 .all()
@@ -184,7 +187,7 @@ def find_similar_runbook_chunks(
     # Fallback: token overlap
     query_tokens = _tokens(query_text)
     matches: List[Tuple[RunbookChunk, float]] = []
-    for chunk in db.query(RunbookChunk).all():
+    for chunk in db.query(RunbookChunk).filter(RunbookChunk.source == "runbooks").all():
         chunk_text = " ".join([chunk.title or "", chunk.content or ""]).strip()
         score = jaccard_similarity(query_tokens, _tokens(chunk_text))
         matches.append((chunk, score))

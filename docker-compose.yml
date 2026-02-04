@@ -48,6 +48,9 @@ services:
     volumes:
       - ./backend:/app
       - ./datasets:/datasets
+      - ./datasets:/app/datasets
+      - ./runbooks:/app/runbooks
+      - ./tests:/app/tests
 
   ml-service:
     build:
@@ -80,6 +83,9 @@ services:
     volumes:
       - ./backend:/app
       - ./datasets:/datasets
+      - ./datasets:/app/datasets
+      - ./runbooks:/app/runbooks
+      - ./tests:/app/tests
 
   frontend:
     build:
