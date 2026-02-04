@@ -1,10 +1,14 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import AppShell from "../../components/AppShell";
 import TopBar from "../../components/TopBar";
 import DataTable, { Column } from "../../components/DataTable";
+import { apiFetch } from "../../lib/api";
+import { formatTime } from "../../lib/format";
+import type { Alert as ApiAlert, AlertListResponse } from "../../lib/types";
 
-type Alert = {
+type AlertRow = {
   id: string;
   title: string;
   source: string;
@@ -13,33 +17,6 @@ type Alert = {
   timestamp: string;
 };
 
-const alerts: Alert[] = [
-  {
-    id: "AL-2041",
-    title: "CPU high on api-prod-3",
-    source: "Datadog",
-    severity: "warning",
-    service: "api-gateway",
-    timestamp: "2m ago",
-  },
-  {
-    id: "AL-2038",
-    title: "ZeroDivisionError in billing service",
-    source: "Sentry",
-    severity: "critical",
-    service: "billing-svc",
-    timestamp: "8m ago",
-  },
-  {
-    id: "AL-2037",
-    title: "Cache hit ratio drifting below threshold",
-    source: "Datadog",
-    severity: "info",
-    service: "redis-cache",
-    timestamp: "15m ago",
-  },
-];
-
 const severityColors: Record<string, string> = {
   critical: "text-critical",
   error: "text-critical/80",
@@ -47,7 +24,7 @@ const severityColors: Record<string, string> = {
   info: "text-info",
 };
 
-const columns: Column<Alert>[] = [
+const columns: Column<AlertRow>[] = [
   {
     key: "id",
     header: "ID",
@@ -103,6 +80,34 @@ const columns: Column<Alert>[] = [
 ];
 
 export default function Page() {
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState<AlertRow[]>([]);
+
+  useEffect(() => {
+    apiFetch<AlertListResponse>("/api/opsrelay/alerts?limit=50")
+      .then((data) => {
+        const mapped = data.items.map((alert: ApiAlert) => ({
+          id: `AL-${alert.id}`,
+          title: alert.title,
+          source: alert.source,
+          severity: (alert.severity || "info").toLowerCase(),
+          service: alert.service_name || "unknown",
+          timestamp: formatTime(alert.alert_timestamp),
+        }));
+        setRows(mapped);
+      })
+      .catch(() => setRows([]));
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((row) => {
+      const hay = `${row.id} ${row.title} ${row.source} ${row.service}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [rows, query]);
+
   return (
     <AppShell>
       <TopBar title="Alerts Inbox" subtitle="Incoming" />
@@ -116,6 +121,8 @@ export default function Page() {
           <input
             className="flex-1 bg-transparent text-sm text-mist placeholder:text-mist/40 focus:outline-none"
             placeholder="Search alerts by message, source, or service..."
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
           />
           <button className="px-3 py-1.5 text-xs text-mist/60 hover:text-white transition-colors">
             Filters
@@ -124,9 +131,10 @@ export default function Page() {
 
         <DataTable
           columns={columns}
-          data={alerts}
+          data={filtered}
           keyExtractor={(item) => item.id}
           noBorder
+          emptyMessage="No alerts found."
         />
       </div>
     </AppShell>

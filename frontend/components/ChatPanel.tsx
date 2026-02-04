@@ -2,31 +2,27 @@
 
 import { useEffect, useRef, useState } from "react";
 
-const seedMessages = [
-  {
-    id: "msg-1",
-    role: "assistant",
-    content: "Standing by. Ask me to summarize, compare, or generate next steps.",
-  },
-];
-
 type ReferenceLink = { label: string; href: string };
 type Message = { id: string; role: string; content: string };
 
 export default function ChatPanel({
   endpoint = "/api/chat/stream",
   references = [],
+  incidentId,
 }: {
   endpoint?: string;
   references?: ReferenceLink[];
+  incidentId?: string;
 }) {
-  const [messages, setMessages] = useState<Message[]>(seedMessages);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [toolEvents, setToolEvents] = useState<string[]>([]);
   const [input, setInput] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const eventRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
+    if (!endpoint) return;
     const source = new EventSource(endpoint);
     eventRef.current = source;
 
@@ -63,6 +59,37 @@ export default function ChatPanel({
     };
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
+    if (incidentId) {
+      submitSummary(incidentId);
+    }
+  };
+
+  const submitSummary = async (id: string) => {
+    setSubmitting(true);
+    setToolEvents((prev) => [...prev, "incident.summarize: running"]);
+    try {
+      const res = await fetch(`/api/opsrelay/incidents/${id}/summarize`, { method: "POST" });
+      const data = await res.json();
+      if (data?.summary) {
+        setMessages((prev) => [
+          ...prev,
+          { id: `msg-${Date.now()}`, role: "assistant", content: data.summary },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          { id: `msg-${Date.now()}`, role: "assistant", content: "Summary generated." },
+        ]);
+      }
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        { id: `msg-${Date.now()}`, role: "assistant", content: "Failed to fetch summary." },
+      ]);
+    } finally {
+      setSubmitting(false);
+      setToolEvents((prev) => [...prev, "incident.summarize: done"]);
+    }
   };
 
   return (
@@ -95,6 +122,9 @@ export default function ChatPanel({
 
       {/* Messages - scrollable area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {messages.length === 0 && (
+          <div className="text-xs text-mist/50">No messages yet.</div>
+        )}
         {messages.map((msg) => (
           <div
             key={msg.id}
@@ -138,7 +168,8 @@ export default function ChatPanel({
           />
           <button
             type="submit"
-            className="flex items-center justify-center w-10 h-10 rounded-xl bg-info/20 text-info hover:bg-info/30 transition-colors"
+            className="flex items-center justify-center w-10 h-10 rounded-xl bg-info/20 text-info hover:bg-info/30 transition-colors disabled:opacity-40"
+            disabled={submitting}
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />

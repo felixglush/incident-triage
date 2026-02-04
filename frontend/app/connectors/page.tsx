@@ -1,22 +1,42 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import AppShell from "../../components/AppShell";
 import TopBar from "../../components/TopBar";
-
-const connectors = [
-  { id: "notion", name: "Notion", status: "Not Connected", detail: "Runbook sync", statusType: "inactive" },
-  { id: "slack", name: "Slack", status: "Pending", detail: "Incident channel history", statusType: "pending" },
-  { id: "linear", name: "Linear", status: "Connected", detail: "Issue context", statusType: "active" },
-  { id: "datadog", name: "Datadog", status: "Connected", detail: "Metrics and alerts", statusType: "active" },
-  { id: "sentry", name: "Sentry", status: "Connected", detail: "Error tracking", statusType: "active" },
-  { id: "pagerduty", name: "PagerDuty", status: "Not Connected", detail: "On-call scheduling", statusType: "inactive" },
-];
+import { apiFetch } from "../../lib/api";
+import type { Connector as ApiConnector, ConnectorListResponse } from "../../lib/types";
 
 const statusStyles: Record<string, string> = {
-  active: "bg-success/20 text-success",
-  pending: "bg-warning/20 text-warning",
-  inactive: "bg-slate/40 text-mist/50",
+  connected: "bg-success/20 text-success",
+  not_connected: "bg-slate/40 text-mist/50",
+};
+
+const statusLabels: Record<string, string> = {
+  connected: "Connected",
+  not_connected: "Not Connected",
 };
 
 export default function Page() {
+  const [connectors, setConnectors] = useState<ApiConnector[]>([]);
+  const [connecting, setConnecting] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiFetch<ConnectorListResponse>("/api/opsrelay/connectors?limit=100")
+      .then((data) => setConnectors(data.items))
+      .catch(() => setConnectors([]));
+  }, []);
+
+  const handleConnect = async (id: string) => {
+    setConnecting(id);
+    try {
+      await apiFetch(`/api/opsrelay/connectors/${id}/connect`, { method: "POST" });
+      const refreshed = await apiFetch<ConnectorListResponse>("/api/opsrelay/connectors?limit=100");
+      setConnectors(refreshed.items);
+    } finally {
+      setConnecting(null);
+    }
+  };
+
   return (
     <AppShell>
       <TopBar title="Connectors" subtitle="Integrations" />
@@ -32,6 +52,11 @@ export default function Page() {
 
         {/* List */}
         <div className="divide-y divide-mist/5">
+          {connectors.length === 0 && (
+            <div className="px-4 py-6 text-sm text-mist/50">
+              No connectors configured.
+            </div>
+          )}
           {connectors.map((connector) => (
             <div
               key={connector.id}
@@ -42,26 +67,25 @@ export default function Page() {
                   <span className="text-sm font-medium text-white group-hover:text-accent transition-colors">
                     {connector.name}
                   </span>
-                  <span className={`inline-block px-2 py-0.5 text-xs ${statusStyles[connector.statusType]}`}>
-                    {connector.status}
+                  <span className={`inline-block px-2 py-0.5 text-xs ${statusStyles[connector.status] || statusStyles.inactive}`}>
+                    {statusLabels[connector.status] || connector.status}
                   </span>
                 </div>
-                <p className="text-xs text-mist/60 mt-1">{connector.detail}</p>
+                <p className="text-xs text-mist/60 mt-1">{connector.detail || "--"}</p>
               </div>
               
-              {connector.statusType === "active" && (
+              {connector.status === "connected" && (
                 <button className="px-3 py-1.5 text-xs text-mist/60 hover:text-white transition-colors">
                   Configure
                 </button>
               )}
-              {connector.statusType === "inactive" && (
-                <button className="px-3 py-1.5 text-xs border border-mist/20 text-mist/70 hover:bg-slate/50 hover:text-white transition-colors">
+              {connector.status === "not_connected" && (
+                <button
+                  className="px-3 py-1.5 text-xs border border-mist/20 text-mist/70 hover:bg-slate/50 hover:text-white transition-colors disabled:opacity-40"
+                  onClick={() => handleConnect(connector.id)}
+                  disabled={connecting === connector.id}
+                >
                   Connect
-                </button>
-              )}
-              {connector.statusType === "pending" && (
-                <button className="px-3 py-1.5 text-xs text-mist/60 hover:text-white transition-colors">
-                  View
                 </button>
               )}
             </div>

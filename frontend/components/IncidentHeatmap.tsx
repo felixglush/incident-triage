@@ -1,32 +1,34 @@
 "use client";
 
-// Generate mock data for the last year (52 weeks)
-function generateHeatmapData() {
-  const data: { date: string; count: number; month: number }[] = [];
-  const today = new Date();
-  
+type HeatmapDay = { date: string; count: number; month: number };
+
+function buildHeatmapFromIncidents(
+  incidents: { created_at?: string | null }[] | undefined,
+): HeatmapDay[] {
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const counts = new Map<string, number>();
+  incidents?.forEach((incident) => {
+    if (!incident.created_at) return;
+    const date = new Date(incident.created_at);
+    if (Number.isNaN(date.getTime())) return;
+    const key = date.toISOString().split("T")[0];
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+
+  const data: HeatmapDay[] = [];
   for (let i = 364; i >= 0; i--) {
     const date = new Date(today);
-    date.setDate(date.getDate() - i);
-    
-    // Generate realistic-looking incident counts
-    const dayOfWeek = date.getDay();
-    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-    const baseCount = isWeekend ? 1 : 3;
-    const variance = Math.floor(Math.random() * 5);
-    const spike = Math.random() > 0.9 ? Math.floor(Math.random() * 8) : 0;
-    
+    date.setUTCDate(date.getUTCDate() - i);
+    const key = date.toISOString().split("T")[0];
     data.push({
-      date: date.toISOString().split("T")[0],
-      count: Math.max(0, baseCount + variance + spike - 2),
-      month: date.getMonth(),
+      date: key,
+      count: counts.get(key) || 0,
+      month: date.getUTCMonth(),
     });
   }
-  
   return data;
 }
-
-const heatmapData = generateHeatmapData();
 
 const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -38,7 +40,12 @@ function getIntensityClass(count: number): string {
   return "bg-critical/50";
 }
 
-export default function IncidentHeatmap() {
+export default function IncidentHeatmap({
+  incidents,
+}: {
+  incidents?: { created_at?: string | null }[];
+}) {
+  const heatmapData = buildHeatmapFromIncidents(incidents || []);
   // Group by weeks (columns)
   const weeks: { date: string; count: number; month: number }[][] = [];
   for (let i = 0; i < heatmapData.length; i += 7) {
@@ -51,8 +58,8 @@ export default function IncidentHeatmap() {
   weeks.forEach((week, weekIndex) => {
     // Check if any day in this week starts a new month (day 1)
     const firstDayOfMonth = week.find((day) => {
-      const date = new Date(day.date);
-      return date.getDate() <= 7 && day.month !== lastMonth;
+      const date = new Date(`${day.date}T00:00:00Z`);
+      return date.getUTCDate() <= 7 && day.month !== lastMonth;
     });
     if (firstDayOfMonth && firstDayOfMonth.month !== lastMonth) {
       monthLabels.push({

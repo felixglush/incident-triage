@@ -1,7 +1,10 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
+import { apiFetch } from "../lib/api";
+import type { DashboardMetricsResponse } from "../lib/types";
 
 const links = [
   { label: "Dashboard", href: "/" },
@@ -13,6 +16,13 @@ const links = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const [metrics, setMetrics] = useState<DashboardMetricsResponse | null>(null);
+
+  useEffect(() => {
+    apiFetch<DashboardMetricsResponse>("/api/opsrelay/dashboard/metrics")
+      .then((data) => setMetrics(data))
+      .catch(() => setMetrics(null));
+  }, []);
 
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/";
@@ -58,8 +68,8 @@ export default function Sidebar() {
             </span>
             <p className="font-mono uppercase tracking-[0.2em]">Live</p>
           </div>
-          <p className="mt-3">3 active incidents</p>
-          <p>MTTR 42m</p>
+          <p className="mt-3">{metrics?.active_incidents ?? 0} active incidents</p>
+          <p>MTTR {metrics?.mttr_minutes !== null && metrics?.mttr_minutes !== undefined ? `${metrics.mttr_minutes}m` : "--"}</p>
         </div>
       </div>
     </div>
