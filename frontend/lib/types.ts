@@ -91,6 +91,8 @@ export type Runbook = {
   id: string;
   title: string;
   source: string;
+  source_type?: string | null;
+  source_uri?: string | null;
   tags: string[];
   last_updated?: string | null;
 };
@@ -100,6 +102,25 @@ export type RunbookListResponse = {
   total: number;
   limit: number;
   offset: number;
+};
+
+export type RunbookSearchItem = {
+  id: number;
+  score: number;
+  source: string;
+  source_uri?: string | null;
+  source_document: string;
+  chunk_index: number;
+  title?: string | null;
+  content?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type RunbookSearchResponse = {
+  items: RunbookSearchItem[];
+  total: number;
+  limit: number;
+  query: string;
 };
 
 export type Connector = {
