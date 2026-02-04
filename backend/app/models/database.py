@@ -35,6 +35,11 @@ class IncidentStatus(str, enum.Enum):
     CLOSED = "closed"
 
 
+class ConnectorStatus(str, enum.Enum):
+    """Connector lifecycle statuses"""
+    CONNECTED = "connected"
+    NOT_CONNECTED = "not_connected"
+
 class ActionType(str, enum.Enum):
     """Types of incident actions for audit trail"""
     STATUS_CHANGE = "status_change"
@@ -409,6 +414,24 @@ class RunbookChunk(Base):
 
     def __repr__(self):
         return f"<RunbookChunk(id={self.id}, document={self.source_document}, chunk={self.chunk_index})>"
+
+
+class Connector(Base):
+    """
+    Connector model stores third-party integration status.
+    """
+    __tablename__ = "connectors"
+
+    id = Column(String(100), primary_key=True)
+    name = Column(String(200), nullable=False)
+    status = Column(Enum(ConnectorStatus), default=ConnectorStatus.NOT_CONNECTED, nullable=False, index=True)
+    detail = Column(String(500))
+
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    def __repr__(self):
+        return f"<Connector(id={self.id}, status={self.status})>"
 
 
 # SQLAlchemy event listeners for automatic timestamp updates
