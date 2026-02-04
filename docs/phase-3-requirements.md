@@ -51,3 +51,23 @@ Pair new incidents to prior ones and generate summaries with citations and next 
 ## Swappable Strategy Notes
 - `embeddings.py` owns the embedding implementation; `incident_similarity.py` only depends on the interface.
 - Future BM25 + vector hybrid retrieval should not change API endpoints or response shapes.
+
+## RAG Implementation Plan
+### Retrieval Strategy
+- Hybrid retrieval: vector similarity + keyword (BM25) blend.
+- Add optional rerank stage (cross-encoder or LLM) for top-k results.
+- Enforce minimum relevance thresholds for both vector and keyword signals.
+
+### Chunking Strategy
+- Chunk runbooks by semantic sections (headings/paragraphs).
+- Target ~300–800 tokens with 10–20% overlap.
+- Preserve `source_document`, `chunk_index`, `tags`, and `title` for citations.
+
+### Indexing + Caching
+- Persist runbook chunks with embeddings and metadata for fast reuse.
+- Cache recent summaries keyed by incident + runbook version.
+- Invalidate cache when runbook content changes.
+
+### Evaluation + Quality
+- Track retrieval coverage: which alerts/services are matched to runbooks.
+- Add offline eval fixtures for known “gold” runbook matches.
