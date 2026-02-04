@@ -1,10 +1,14 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import AppShell from "../../components/AppShell";
 import TopBar from "../../components/TopBar";
 import DataTable, { Column } from "../../components/DataTable";
+import { apiFetch } from "../../lib/api";
+import { formatTime } from "../../lib/format";
+import type { Incident, IncidentListResponse } from "../../lib/types";
 
-type Incident = {
+type IncidentRow = {
   id: string;
   title: string;
   status: string;
@@ -14,39 +18,6 @@ type Incident = {
   service: string;
   updated: string;
 };
-
-const incidents: Incident[] = [
-  {
-    id: "INC-1042",
-    title: "Database connection pool exhausted",
-    status: "Investigating",
-    statusType: "investigating",
-    severity: "Critical",
-    severityType: "critical",
-    service: "platform-db",
-    updated: "2m ago",
-  },
-  {
-    id: "INC-1041",
-    title: "API latency spike in us-east-1",
-    status: "Open",
-    statusType: "open",
-    severity: "Warning",
-    severityType: "warning",
-    service: "api-gateway",
-    updated: "14m ago",
-  },
-  {
-    id: "INC-1038",
-    title: "Billing webhook failure",
-    status: "Resolved",
-    statusType: "resolved",
-    severity: "Error",
-    severityType: "error",
-    service: "billing-svc",
-    updated: "1h ago",
-  },
-];
 
 const severityColors: Record<string, string> = {
   critical: "text-critical",
@@ -61,7 +32,7 @@ const statusColors: Record<string, string> = {
   resolved: "bg-success/20 text-success",
 };
 
-const columns: Column<Incident>[] = [
+const columns: Column<IncidentRow>[] = [
   {
     key: "id",
     header: "ID",
@@ -119,6 +90,36 @@ const columns: Column<Incident>[] = [
 ];
 
 export default function Page() {
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState<IncidentRow[]>([]);
+
+  useEffect(() => {
+    apiFetch<IncidentListResponse>("/api/opsrelay/incidents?limit=50")
+      .then((data) => {
+        const mapped = data.items.map((incident) => ({
+          id: `INC-${incident.id}`,
+          title: incident.title,
+          status: incident.status,
+          statusType: incident.status,
+          severity: incident.severity,
+          severityType: incident.severity,
+          service: incident.affected_services?.[0] || "unknown",
+          updated: formatTime(incident.updated_at),
+        }));
+        setRows(mapped);
+      })
+      .catch(() => setRows([]));
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((row) => {
+      const haystack = `${row.id} ${row.title} ${row.service} ${row.status}`.toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [rows, query]);
+
   return (
     <AppShell>
       <TopBar title="Incidents" subtitle="Overview" />
@@ -132,6 +133,8 @@ export default function Page() {
           <input
             className="flex-1 bg-transparent text-sm text-mist placeholder:text-mist/40 focus:outline-none"
             placeholder="Search incidents by title, service, or ID..."
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
           />
           <button className="px-3 py-1.5 text-xs text-mist/60 hover:text-white transition-colors">
             Filters
@@ -140,10 +143,11 @@ export default function Page() {
 
         <DataTable
           columns={columns}
-          data={incidents}
+          data={filtered}
           keyExtractor={(item) => item.id}
-          href={(item) => `/incidents/${item.id}`}
+          href={(item) => `/incidents/${item.id.replace("INC-", "")}`}
           noBorder
+          emptyMessage="No incidents found."
         />
       </div>
     </AppShell>

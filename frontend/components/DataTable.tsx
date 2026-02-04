@@ -17,6 +17,7 @@ type DataTableProps<T> = {
   onRowClick?: (item: T) => void;
   href?: (item: T) => string;
   noBorder?: boolean;
+  emptyMessage?: string;
 };
 
 export default function DataTable<T>({
@@ -26,6 +27,7 @@ export default function DataTable<T>({
   onRowClick,
   href,
   noBorder,
+  emptyMessage = "No data available.",
 }: DataTableProps<T>) {
   // Build grid template from column widths
   const gridTemplate = columns.map((col) => col.width || "1fr").join(" ");
@@ -52,6 +54,11 @@ export default function DataTable<T>({
 
       {/* Rows */}
       <div className="divide-y divide-mist/5">
+        {data.length === 0 && (
+          <div className="px-4 py-6 text-sm text-mist/50">
+            {emptyMessage}
+          </div>
+        )}
         {data.map((item) => {
           const key = keyExtractor(item);
           const rowContent = (

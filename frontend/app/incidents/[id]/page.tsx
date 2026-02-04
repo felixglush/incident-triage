@@ -1,39 +1,131 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useParams } from "next/navigation";
 import AppShell from "../../../components/AppShell";
 import ChatPanel from "../../../components/ChatPanel";
 import IncidentHeader from "./IncidentHeader";
+import { apiFetch } from "../../../lib/api";
+import { formatDateTime, formatTime } from "../../../lib/format";
+import type {
+  IncidentDetailResponse,
+  SimilarIncidentResponse,
+} from "../../../lib/types";
 
-const timeline = [
-  { time: "14:02", title: "Alert grouped", detail: "Datadog alert added to incident" },
-  { time: "14:05", title: "Service degradation", detail: "Connection pool reached 95%" },
-  { time: "14:08", title: "Action taken", detail: "Restarted primary DB replicas" },
-];
-
-const similar = [
-  { id: "INC-0921", title: "DB connection spikes during deploy", score: "0.86" },
-  { id: "INC-0897", title: "Pool saturation on worker fleet", score: "0.74" },
-];
-
-const runbooks = [
-  { id: "RB-001", title: "Postgres Connection Pool", source: "db-troubleshooting.md" },
-  { id: "RB-002", title: "Rate-limiting DB clients", source: "capacity.md" },
-];
-
-const nextSteps = [
-  "Page on-call and open incident bridge",
-  "Verify connection limits in production",
-  "Check for long-running queries in pg_stat_activity",
-];
+const statusNext: Record<string, string | null> = {
+  open: "investigating",
+  investigating: "resolved",
+  resolved: "closed",
+  closed: null,
+};
 
 export default function Page() {
-  const chatReferences = [
-    { label: "INC-0921", href: "/incidents/INC-0921" },
-    { label: "INC-0897", href: "/incidents/INC-0897" },
-    { label: "Runbook: Pooling", href: "/runbooks" },
-  ];
+  const params = useParams();
+  const incidentId = Array.isArray(params?.id) ? params.id[0] : params?.id;
+  const [detail, setDetail] = useState<IncidentDetailResponse | null>(null);
+  const [similar, setSimilar] = useState<SimilarIncidentResponse | null>(null);
+  const [runbooks, setRunbooks] = useState<{ id: string; title: string; source: string }[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [statusUpdating, setStatusUpdating] = useState(false);
+
+  useEffect(() => {
+    if (!incidentId) return;
+    let isMounted = true;
+    setLoading(true);
+    Promise.all([
+      apiFetch<IncidentDetailResponse>(`/api/opsrelay/incidents/${incidentId}`),
+      apiFetch<SimilarIncidentResponse>(`/api/opsrelay/incidents/${incidentId}/similar?limit=5`),
+      apiFetch<{ items: { id: string; title: string; source: string }[] }>(`/api/opsrelay/runbooks?limit=5`),
+    ])
+      .then(([detailRes, similarRes, runbookRes]) => {
+        if (!isMounted) return;
+        setDetail(detailRes);
+        setSimilar(similarRes);
+        setRunbooks(runbookRes.items || []);
+      })
+      .catch(() => {
+        if (!isMounted) return;
+        setDetail(null);
+        setSimilar(null);
+        setRunbooks([]);
+      })
+      .finally(() => {
+        if (!isMounted) return;
+        setLoading(false);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [incidentId]);
+
+  const timeline = useMemo(() => {
+    if (!detail) return [];
+    const alerts = detail.alerts.map((alert) => ({
+      time: alert.alert_timestamp || alert.created_at || "",
+      title: alert.title,
+      detail: alert.message || `${alert.source} alert`,
+    }));
+    const actions = detail.actions.map((action) => ({
+      time: action.timestamp || "",
+      title: action.action_type,
+      detail: action.description,
+    }));
+    return [...actions, ...alerts].sort((a, b) => (b.time || "").localeCompare(a.time || ""));
+  }, [detail]);
+
+  const nextSteps = detail?.incident.next_steps || [];
+
+  const chatReferences = useMemo(() => {
+    const refs = (similar?.items || []).map((item) => ({
+      label: `INC-${item.id}`,
+      href: `/incidents/${item.id}`,
+    }));
+    if (runbooks.length > 0) {
+      refs.push({ label: "Runbooks", href: "/runbooks" });
+    }
+    return refs;
+  }, [similar, runbooks]);
+
+  const handleAdvanceStatus = async () => {
+    if (!detail || !incidentId) return;
+    const current = detail.incident.status?.toLowerCase() || "open";
+    const next = statusNext[current];
+    if (!next) return;
+    setStatusUpdating(true);
+    try {
+      await apiFetch(`/api/opsrelay/incidents/${incidentId}/status?status=${next}`, {
+        method: "PATCH",
+      });
+      const refreshed = await apiFetch<IncidentDetailResponse>(
+        `/api/opsrelay/incidents/${incidentId}`,
+      );
+      setDetail(refreshed);
+    } finally {
+      setStatusUpdating(false);
+    }
+  };
+
+  if (!incidentId) {
+    return (
+      <AppShell>
+        <div className="text-mist/60">Missing incident id.</div>
+      </AppShell>
+    );
+  }
 
   return (
-    <AppShell rightPanel={<ChatPanel references={chatReferences} />}>
-      <IncidentHeader />
+    <AppShell rightPanel={<ChatPanel references={chatReferences} incidentId={incidentId} endpoint={undefined} />}>
+      <IncidentHeader
+        incidentId={incidentId}
+        title={detail?.incident.title || "Loading incident"}
+        severity={detail?.incident.severity || "--"}
+        status={detail?.incident.status || "open"}
+        service={detail?.incident.affected_services?.[0] || null}
+        updatedAt={detail?.incident.updated_at || null}
+        onAdvanceStatus={handleAdvanceStatus}
+        nextStatusLabel={detail ? statusNext[detail.incident.status?.toLowerCase() || "open"] : null}
+        statusUpdating={statusUpdating}
+      />
 
       {/* Two-column layout for main content */}
       <div className="grid gap-6 xl:grid-cols-2">
@@ -41,9 +133,16 @@ export default function Page() {
         <div className="border border-mist/10 bg-graphite/30">
           <div className="flex items-center justify-between px-4 py-3 border-b border-mist/10">
             <h3 className="text-sm font-medium text-white">Incident Feed</h3>
-            <span className="text-xs text-mist/50">Updated 2m ago</span>
+            <span className="text-xs text-mist/50">
+              {detail?.incident.updated_at ? `Updated ${formatDateTime(detail.incident.updated_at)}` : "Updated --"}
+            </span>
           </div>
           <div className="divide-y divide-mist/5">
+            {timeline.length === 0 && (
+              <div className="px-4 py-4 text-sm text-mist/50">
+                {loading ? "Loading incident activity..." : "No activity recorded yet."}
+              </div>
+            )}
             {timeline.map((item, i) => (
               <div key={item.time} className="flex items-start gap-3 px-4 py-3 hover:bg-slate/30 transition-colors">
                 <div
@@ -54,7 +153,9 @@ export default function Page() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-sm text-white">{item.title}</p>
-                    <span className="font-mono text-xs text-mist/50">{item.time}</span>
+                    <span className="font-mono text-xs text-mist/50">
+                      {formatTime(item.time)}
+                    </span>
                   </div>
                   <p className="text-xs text-mist/60 mt-0.5">{item.detail}</p>
                 </div>
@@ -71,19 +172,24 @@ export default function Page() {
               <h3 className="text-sm font-medium text-white">Similar Incidents</h3>
             </div>
             <div className="divide-y divide-mist/5">
-              {similar.map((item) => (
+              {(similar?.items || []).length === 0 && (
+                <div className="px-4 py-4 text-sm text-mist/50">
+                  {loading ? "Finding similar incidents..." : "No similar incidents yet."}
+                </div>
+              )}
+              {(similar?.items || []).map((item) => (
                 <a
                   key={item.id}
                   href={`/incidents/${item.id}`}
                   className="flex items-center justify-between gap-4 px-4 py-3 hover:bg-slate/30 transition-colors group"
                 >
                   <div className="min-w-0">
-                    <span className="text-xs font-mono text-mist/50">{item.id}</span>
+                    <span className="text-xs font-mono text-mist/50">INC-{item.id}</span>
                     <p className="text-sm text-white group-hover:text-accent transition-colors truncate">
                       {item.title}
                     </p>
                   </div>
-                  <span className="text-xs text-info flex-shrink-0">{item.score}</span>
+                  <span className="text-xs text-info flex-shrink-0">{item.score.toFixed(2)}</span>
                 </a>
               ))}
             </div>
@@ -95,6 +201,11 @@ export default function Page() {
               <h3 className="text-sm font-medium text-white">Runbook References</h3>
             </div>
             <div className="divide-y divide-mist/5">
+              {runbooks.length === 0 && (
+                <div className="px-4 py-4 text-sm text-mist/50">
+                  {loading ? "Loading runbooks..." : "No runbook references available."}
+                </div>
+              )}
               {runbooks.map((item) => (
                 <a
                   key={item.id}
@@ -120,6 +231,11 @@ export default function Page() {
           <h3 className="text-sm font-medium text-white">Suggested Next Steps</h3>
         </div>
         <div className="divide-y divide-mist/5">
+          {nextSteps.length === 0 && (
+            <div className="px-4 py-4 text-sm text-mist/50">
+              {loading ? "Loading next steps..." : "No next steps available."}
+            </div>
+          )}
           {nextSteps.map((step, i) => (
             <div
               key={step}

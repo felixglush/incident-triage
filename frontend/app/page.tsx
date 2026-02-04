@@ -1,11 +1,19 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import AppShell from "../components/AppShell";
 import TopBar from "../components/TopBar";
 import DataTable, { Column } from "../components/DataTable";
 import IncidentHeatmap from "../components/IncidentHeatmap";
+import { apiFetch } from "../lib/api";
+import { formatTime } from "../lib/format";
+import type {
+  DashboardMetricsResponse,
+  Incident,
+  IncidentListResponse,
+} from "../lib/types";
 
-type Incident = {
+type IncidentRow = {
   id: string;
   title: string;
   status: string;
@@ -15,39 +23,6 @@ type Incident = {
   service: string;
   updated: string;
 };
-
-const incidents: Incident[] = [
-  {
-    id: "INC-1042",
-    title: "Database connection pool exhausted",
-    status: "Investigating",
-    statusType: "investigating",
-    severity: "Critical",
-    severityType: "critical",
-    service: "platform-db",
-    updated: "2m ago",
-  },
-  {
-    id: "INC-1041",
-    title: "API latency spike in us-east-1",
-    status: "Open",
-    statusType: "open",
-    severity: "Warning",
-    severityType: "warning",
-    service: "api-gateway",
-    updated: "14m ago",
-  },
-  {
-    id: "INC-1038",
-    title: "Billing webhook failure",
-    status: "Resolved",
-    statusType: "resolved",
-    severity: "Error",
-    severityType: "error",
-    service: "billing-svc",
-    updated: "1h ago",
-  },
-];
 
 const severityColors: Record<string, string> = {
   critical: "text-critical",
@@ -62,7 +37,7 @@ const statusColors: Record<string, string> = {
   resolved: "bg-success/20 text-success",
 };
 
-const columns: Column<Incident>[] = [
+const columns: Column<IncidentRow>[] = [
   {
     key: "id",
     header: "ID",
@@ -120,6 +95,43 @@ const columns: Column<Incident>[] = [
 ];
 
 export default function Page() {
+  const [rows, setRows] = useState<IncidentRow[]>([]);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [metrics, setMetrics] = useState<DashboardMetricsResponse | null>(null);
+
+  useEffect(() => {
+    Promise.all([
+      apiFetch<IncidentListResponse>("/api/opsrelay/incidents?limit=50"),
+      apiFetch<DashboardMetricsResponse>("/api/opsrelay/dashboard/metrics"),
+    ])
+      .then(([incidentRes, metricsRes]) => {
+        const mapped = incidentRes.items.map((incident) => ({
+          id: `INC-${incident.id}`,
+          title: incident.title,
+          status: incident.status,
+          statusType: incident.status,
+          severity: incident.severity,
+          severityType: incident.severity,
+          service: incident.affected_services?.[0] || "unknown",
+          updated: formatTime(incident.updated_at),
+        }));
+        setRows(mapped);
+        setIncidents(incidentRes.items);
+        setMetrics(metricsRes);
+      })
+      .catch(() => {
+        setRows([]);
+        setIncidents([]);
+        setMetrics(null);
+      });
+  }, []);
+
+  const activeIncidents = metrics?.active_incidents ?? 0;
+  const criticalIncidents = metrics?.critical_incidents ?? 0;
+  const untriagedAlerts = metrics?.untriaged_alerts ?? 0;
+  const mttaMinutes = metrics?.mtta_minutes ?? null;
+  const mttrMinutes = metrics?.mttr_minutes ?? null;
+
   return (
     <AppShell>
       <TopBar title="Overview" subtitle="Dashboard" />
@@ -130,7 +142,9 @@ export default function Page() {
           {/* Active Incidents */}
           <div className="px-4 py-3">
             <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-display text-white">2</span>
+              <span className="text-2xl font-display text-white">
+                {activeIncidents || 0}
+              </span>
               <span className="text-xs text-mist/50">active</span>
             </div>
             <p className="text-xs text-mist/40 mt-0.5">Incidents</p>
@@ -139,7 +153,9 @@ export default function Page() {
           {/* Critical */}
           <div className="px-4 py-3">
             <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-display text-critical">1</span>
+              <span className="text-2xl font-display text-critical">
+                {criticalIncidents || 0}
+              </span>
               <span className="text-xs text-critical/60">critical</span>
             </div>
             <p className="text-xs text-mist/40 mt-0.5">Needs attention</p>
@@ -148,7 +164,9 @@ export default function Page() {
           {/* Open Alerts */}
           <div className="px-4 py-3">
             <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-display text-white">7</span>
+              <span className="text-2xl font-display text-white">
+                {untriagedAlerts || 0}
+              </span>
               <span className="text-xs text-mist/50">untriaged</span>
             </div>
             <p className="text-xs text-mist/40 mt-0.5">Alerts</p>
@@ -157,8 +175,10 @@ export default function Page() {
           {/* MTTA */}
           <div className="px-4 py-3">
             <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-display text-white">3m</span>
-              <span className="text-xs text-success">↓ 12%</span>
+              <span className="text-2xl font-display text-white">
+                {mttaMinutes !== null ? `${mttaMinutes}m` : "--"}
+              </span>
+              <span className="text-xs text-success">avg</span>
             </div>
             <p className="text-xs text-mist/40 mt-0.5">MTTA (7d avg)</p>
           </div>
@@ -166,8 +186,10 @@ export default function Page() {
           {/* MTTR */}
           <div className="px-4 py-3">
             <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-display text-white">42m</span>
-              <span className="text-xs text-warning">↑ 8%</span>
+              <span className="text-2xl font-display text-white">
+                {mttrMinutes !== null ? `${mttrMinutes}m` : "--"}
+              </span>
+              <span className="text-xs text-warning">avg</span>
             </div>
             <p className="text-xs text-mist/40 mt-0.5">MTTR (7d avg)</p>
           </div>
@@ -176,7 +198,7 @@ export default function Page() {
       </div>
 
       {/* Incident Heatmap */}
-      <IncidentHeatmap />
+      <IncidentHeatmap incidents={incidents} />
 
       {/* Table with header */}
       <div className="border border-mist/10 bg-graphite/30">
@@ -188,10 +210,11 @@ export default function Page() {
         </div>
         <DataTable
           columns={columns}
-          data={incidents}
+          data={rows}
           keyExtractor={(item) => item.id}
-          href={(item) => `/incidents/${item.id}`}
+          href={(item) => `/incidents/${item.id.replace("INC-", "")}`}
           noBorder
+          emptyMessage="No incidents available yet."
         />
       </div>
     </AppShell>

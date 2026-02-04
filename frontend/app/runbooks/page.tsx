@@ -1,10 +1,14 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import AppShell from "../../components/AppShell";
 import TopBar from "../../components/TopBar";
 import DataTable, { Column } from "../../components/DataTable";
+import { apiFetch } from "../../lib/api";
+import { formatDate } from "../../lib/format";
+import type { Runbook as ApiRunbook, RunbookListResponse } from "../../lib/types";
 
-type Runbook = {
+type RunbookRow = {
   id: string;
   title: string;
   source: string;
@@ -12,31 +16,7 @@ type Runbook = {
   lastUpdated: string;
 };
 
-const runbooks: Runbook[] = [
-  {
-    id: "RB-001",
-    title: "Postgres Connection Pool",
-    source: "db-troubleshooting.md",
-    tags: ["db", "pooling"],
-    lastUpdated: "3d ago",
-  },
-  {
-    id: "RB-002",
-    title: "Redis Failover",
-    source: "cache.md",
-    tags: ["redis", "infra"],
-    lastUpdated: "1w ago",
-  },
-  {
-    id: "RB-003",
-    title: "Payment Retry Strategy",
-    source: "billing.md",
-    tags: ["payments"],
-    lastUpdated: "2w ago",
-  },
-];
-
-const columns: Column<Runbook>[] = [
+const columns: Column<RunbookRow>[] = [
   {
     key: "id",
     header: "ID",
@@ -91,6 +71,33 @@ const columns: Column<Runbook>[] = [
 ];
 
 export default function Page() {
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState<RunbookRow[]>([]);
+
+  useEffect(() => {
+    apiFetch<RunbookListResponse>("/api/opsrelay/runbooks?limit=100")
+      .then((data) => {
+        const mapped = data.items.map((runbook: ApiRunbook) => ({
+          id: runbook.id,
+          title: runbook.title,
+          source: runbook.source,
+          tags: runbook.tags || [],
+          lastUpdated: formatDate(runbook.last_updated),
+        }));
+        setRows(mapped);
+      })
+      .catch(() => setRows([]));
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((row) => {
+      const hay = `${row.id} ${row.title} ${row.tags.join(" ")} ${row.source}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [rows, query]);
+
   return (
     <AppShell>
       <TopBar title="Runbook Explorer" subtitle="Knowledge" />
@@ -104,6 +111,8 @@ export default function Page() {
           <input
             className="flex-1 bg-transparent text-sm text-mist placeholder:text-mist/40 focus:outline-none"
             placeholder="Search runbooks by title or tag..."
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
           />
           <button className="px-3 py-1.5 text-xs text-mist/60 hover:text-white transition-colors">
             Filters
@@ -112,10 +121,11 @@ export default function Page() {
 
         <DataTable
           columns={columns}
-          data={runbooks}
+          data={filtered}
           keyExtractor={(item) => item.id}
           href={(item) => `/runbooks/${item.id}`}
           noBorder
+          emptyMessage="No runbooks available."
         />
       </div>
     </AppShell>
