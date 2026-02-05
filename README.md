@@ -9,7 +9,40 @@ See `implementation.md` and `ROADMAP.md` for the phased plan.
 
 ## Dev Quickstart
 
-// To add
+### Start the App (Docker Compose)
+
+```bash
+docker-compose up --build
+```
+
+Services:
+- Frontend: http://localhost:3001
+- Backend API: http://localhost:8000
+- ML service: http://localhost:8001
+- Postgres: localhost:54322
+- Redis: localhost:6379
+
+Notes:
+- `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are optional for basic flows, but required
+  for LLM-backed summaries/classification.
+- `SKIP_SIGNATURE_VERIFICATION` is set to `true` in `docker-compose.yml` for local dev.
+
+### Run Tests
+
+Quick run:
+```bash
+cd tests
+pytest
+```
+
+Integration tests (requires Postgres + Redis):
+```bash
+docker-compose -f docker-compose.test.yml up -d
+cd tests
+pytest -m integration
+```
+
+More commands and troubleshooting: see `tests/README.md`.
 
 ## Repo Layout
 - `backend/`: FastAPI API, Celery workers, DB models
