@@ -13,9 +13,19 @@ from typing import Generator
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+
+# Ensure env vars are set before importing app modules
+os.environ.setdefault(
+    "DATABASE_URL", "postgresql://user:password@localhost:54323/opsrelay_test"
+)
+os.environ.setdefault("REDIS_URL", "redis://localhost:6380/0")
+os.environ.setdefault("SKIP_SIGNATURE_VERIFICATION", "true")
+os.environ.setdefault("CELERY_TASK_ALWAYS_EAGER", "true")
+os.environ.setdefault("CELERY_TASK_EAGER_PROPAGATES", "true")
+os.environ.setdefault("TESTING", "true")
 
 # Add backend directory to Python path so we can import app modules
 backend_path = os.path.join(os.path.dirname(__file__), "..", "backend")
@@ -47,6 +57,11 @@ def setup_test_database():
     """
     # Drop all tables and recreate (clean slate)
     Base.metadata.drop_all(bind=engine)
+    # Ensure required PostgreSQL extensions exist
+    with engine.connect() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+        conn.commit()
     Base.metadata.create_all(bind=engine)
     yield
     # Teardown: Drop all tables after test session
@@ -124,7 +139,7 @@ def test_client(db_session) -> TestClient:
         try:
             yield db_session
         finally:
-            pass
+            db_session.expire_all()
 
     app.dependency_overrides[get_db] = override_get_db
 

@@ -96,12 +96,15 @@ class Alert(Base):
     severity = Column(Enum(SeverityLevel), index=True)
     predicted_team = Column(String(100), index=True)
     confidence_score = Column(Float)
+    classification_source = Column(String(50), index=True)
 
     # Extracted entities from NER
     service_name = Column(String(200), index=True)
     environment = Column(String(50), index=True)
     region = Column(String(50))
     error_code = Column(String(100))
+    entity_source = Column(String(50), index=True)
+    entity_sources = Column(JSONB, nullable=True)
 
     # Soft delete flag
     deleted_at = Column(DateTime(timezone=True))
@@ -191,6 +194,8 @@ class Incident(Base):
     title = Column(String(500), nullable=False)
     summary = Column(Text)  # ML-generated summary
     severity = Column(Enum(SeverityLevel), nullable=False, index=True)
+    summary_citations = Column(JSONB)  # [{type, id, title, score, source_document}]
+    next_steps = Column(JSONB)  # ["step one", "step two"]
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
@@ -202,6 +207,12 @@ class Incident(Base):
     affected_services = Column(JSONB, default=list)  # Array of service names
     root_cause = Column(Text)
     resolution_notes = Column(Text)
+
+    # Embedding for similarity search
+    if HAS_PGVECTOR:
+        incident_embedding = Column(Vector(384))
+    else:
+        incident_embedding = Column(JSONB)
 
     # Metrics for SLA tracking
     time_to_acknowledge = Column(Integer)  # Seconds
@@ -235,6 +246,10 @@ class Incident(Base):
 
         # GIN index for JSONB array queries on affected_services
         Index("ix_incidents_affected_services_gin", "affected_services", postgresql_using="gin"),
+
+        Index("ix_incidents_embedding_vector", "incident_embedding",
+              postgresql_using="ivfflat",
+              postgresql_with={"lists": 100}) if HAS_PGVECTOR else None,
 
         # Check constraints
         CheckConstraint(

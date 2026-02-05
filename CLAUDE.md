@@ -11,7 +11,7 @@ When exiting plan mode to begin implementation, ALWAYS save the implementation p
 
 ## Project Status
 
-This is a portfolio project currently in development. The repository contains comprehensive implementation documentation but minimal code. Development follows a three-phase approach detailed in [implementation.md](implementation.md).
+This is a portfolio project currently in development. Development follows phased delivery detailed in [implementation.md](implementation.md) and [ROADMAP.md](ROADMAP.md). Architecture is summarized in [docs/architecture.md](docs/architecture.md).
 
 ## Technology Stack
 

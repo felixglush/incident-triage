@@ -74,6 +74,8 @@ class WebhookProcessor:
         self.db.add(alert)
         self.db.commit()
         self.db.refresh(alert)
+        # Avoid stale identity map when async processing updates this alert
+        self.db.expire(alert)
 
         logger.info(f"Created alert {alert.id} from Datadog: {alert.title}")
         return alert
@@ -129,6 +131,8 @@ class WebhookProcessor:
         self.db.add(alert)
         self.db.commit()
         self.db.refresh(alert)
+        # Avoid stale identity map when async processing updates this alert
+        self.db.expire(alert)
 
         logger.info(f"Created alert {alert.id} from Sentry: {alert.title}")
         return alert

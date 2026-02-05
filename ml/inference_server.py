@@ -41,6 +41,7 @@ class EntityResponse(BaseModel):
     environment: Optional[str] = None
     region: Optional[str] = None
     error_code: Optional[str] = None
+    entity_source: Optional[str] = None
 
 
 # Request logging middleware
@@ -179,7 +180,7 @@ def _classify_team(text: str) -> tuple[str, float]:
         return "frontend", 0.85
 
     # Default to backend
-    return "backend", 0.6
+    return "backend", 0.7
 
 
 # Entity extraction endpoint
@@ -199,6 +200,7 @@ async def extract_entities(request: NERRequest):
     logger.debug(f"Extracting entities from: {text[:100]}...")
 
     # Extract using regex patterns (fast, deterministic)
+    entity_source = "regex"
     entities = {
         "environment": _extract_environment(text),
         "region": _extract_region(text),
@@ -209,10 +211,12 @@ async def extract_entities(request: NERRequest):
     # If service name not found via regex, try NER model
     if not entities["service_name"] and ner_model is not None:
         entities["service_name"] = _extract_service_with_ner(text)
+        if entities["service_name"]:
+            entity_source = "ner"
 
     logger.debug(f"Extracted entities: {entities}")
 
-    return EntityResponse(**entities)
+    return EntityResponse(**entities, entity_source=entity_source)
 
 
 def _extract_environment(text: str) -> Optional[str]:
