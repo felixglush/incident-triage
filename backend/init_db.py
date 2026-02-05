@@ -138,6 +138,15 @@ def create_seed_data():
         notion_path = Path(__file__).resolve().parent / "datasets" / "notion_mock"
         notion_chunks_loaded = ingest_folder(db, notion_path, source="notion", tags=["notion"])
 
+        # Backfill search_tsv for BM25 queries
+        db.execute(
+            text(
+                "UPDATE runbook_chunks "
+                "SET search_tsv = to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,'')) "
+                "WHERE source = 'runbooks' AND search_tsv IS NULL"
+            )
+        )
+
         # Create sample connectors (only webhooks implemented are connected)
         connectors = [
             Connector(id="notion", name="Notion", status=ConnectorStatus.NOT_CONNECTED, detail="Runbook sync"),

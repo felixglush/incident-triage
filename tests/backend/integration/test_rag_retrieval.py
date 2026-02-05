@@ -96,3 +96,21 @@ class TestRagRetrieval:
         results = find_similar_runbook_chunks(db_session, embed_text(query), query, limit=2)
         assert results
         assert results[0]["chunk"].title == "Pooling instructions"
+
+    def test_bm25_filters_non_matching_queries(self, db_session):
+        db_session.add(
+            RunbookChunk(
+                source_document="auth.md",
+                chunk_index=0,
+                source="runbooks",
+                title="Auth Outage",
+                content="Auth validation failures and token errors.",
+                embedding=embed_text("Auth validation failures and token errors."),
+                doc_metadata={"tags": ["auth"]},
+            )
+        )
+        db_session.commit()
+
+        query = "the and of"
+        results = find_similar_runbook_chunks(db_session, embed_text(query), query, limit=5)
+        assert results == []
