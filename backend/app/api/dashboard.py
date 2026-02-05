@@ -36,7 +36,7 @@ def get_dashboard_metrics(db: Session = Depends(get_db)):
 
     ack_seconds = case(
         (Incident.time_to_acknowledge.isnot(None), Incident.time_to_acknowledge),
-        else_=func.extract("epoch", Incident.updated_at - Incident.created_at),
+        else_=None,
     )
     resolve_seconds = case(
         (Incident.time_to_resolve.isnot(None), Incident.time_to_resolve),
@@ -48,7 +48,7 @@ def get_dashboard_metrics(db: Session = Depends(get_db)):
 
     mtta_seconds = (
         db.query(func.avg(ack_seconds))
-        .filter(Incident.created_at.isnot(None), Incident.updated_at.isnot(None))
+        .filter(Incident.time_to_acknowledge.isnot(None))
         .scalar()
     )
 
