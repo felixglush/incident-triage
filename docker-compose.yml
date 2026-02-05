@@ -29,6 +29,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: prod
     ports:
       - "8000:8000"
     environment:
@@ -51,6 +52,9 @@ services:
       - ./datasets:/app/datasets
       - ./runbooks:/app/runbooks
       - ./tests:/app/tests
+    env_file:
+      - .env
+
 
   ml-service:
     build:
@@ -66,6 +70,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: prod
     command: celery -A app.workers.celery_app worker --loglevel=info
     environment:
       DATABASE_URL: postgresql://user:password@postgres:5432/opsrelay
@@ -102,6 +107,24 @@ services:
     depends_on:
       backend:
         condition: service_started
+
+  eval-runner:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: dev
+    command: python /app/tools/run_rag_eval.py --dataset /app/datasets/evals/rag_eval_cases.jsonl --limit 5 --log-langsmith
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://user:password@postgres:5432/opsrelay
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - ./datasets:/app/datasets
+      - ./runbooks:/app/runbooks
 
 volumes:
   postgres_data:

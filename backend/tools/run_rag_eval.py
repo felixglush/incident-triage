@@ -18,6 +18,8 @@ from typing import Any, Dict, Iterable, List
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dotenv import load_dotenv
+from langsmith import traceable, Client
+from langsmith.wrappers import wrap_openai
 
 from app.database import get_db_context
 from app.services.embeddings import embed_text
@@ -31,6 +33,7 @@ class EvalCase:
     expected_source_document: str
     expected_contains: str
     expected_answer_contains: str | None = None
+    gold_answer: str | None = None
 
 
 def load_cases(path: Path) -> List[EvalCase]:
@@ -56,6 +59,7 @@ def build_context(retrieved: Iterable[Dict[str, Any]]) -> str:
     return "\n\n".join(context)
 
 
+@traceable(run_type="llm", name="Generate Answer")
 def llm_answer(question: str, retrieved: Iterable[Dict[str, Any]]) -> str:
     if not os.getenv("OPENAI_API_KEY"):
         raise SystemExit("OPENAI_API_KEY is required for LLM evaluations.")
@@ -65,7 +69,7 @@ def llm_answer(question: str, retrieved: Iterable[Dict[str, Any]]) -> str:
     except Exception:
         raise SystemExit("OpenAI SDK is not installed. Add openai to requirements.")
 
-    client = OpenAI()
+    client = wrap_openai(OpenAI())
     context_text = build_context(retrieved)
     model = os.getenv("OPENAI_RAG_MODEL", "gpt-5.2")
 
@@ -84,7 +88,13 @@ def llm_answer(question: str, retrieved: Iterable[Dict[str, Any]]) -> str:
     return response.output_text.strip()
 
 
-def llm_judge(question: str, answer: str, retrieved: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+@traceable(run_type="llm", name="Judge Answer")
+def llm_judge(
+    question: str,
+    answer: str,
+    retrieved: Iterable[Dict[str, Any]],
+    gold_answer: str | None = None,
+) -> Dict[str, Any]:
     if not os.getenv("OPENAI_API_KEY"):
         raise SystemExit("OPENAI_API_KEY is required for LLM evaluations.")
 
@@ -93,19 +103,23 @@ def llm_judge(question: str, answer: str, retrieved: Iterable[Dict[str, Any]]) -
     except Exception:
         raise SystemExit("OpenAI SDK is not installed. Add openai to requirements.")
 
-    client = OpenAI()
+    client = wrap_openai(OpenAI())
     context_text = build_context(retrieved)
 
+    gold_block = f"\nGold Answer:\n{gold_answer}\n\n" if gold_answer else ""
     prompt = (
         "You are evaluating a RAG system.\n"
-        "Return JSON with three scores in [0,1]:\n"
+        "Return JSON with four scores in [0,1]:\n"
         "- retrieval_relevance: do the retrieved chunks contain information relevant to the question?\n"
         "- answer_relevance: does the answer address the question?\n"
         "- groundedness: is the answer supported by the retrieved context?\n\n"
         f"Question:\n{question}\n\n"
         f"Answer:\n{answer}\n\n"
         f"Retrieved Context:\n{context_text}\n\n"
-        "Return only JSON like: {\"retrieval_relevance\": 0.7, \"answer_relevance\": 0.7, \"groundedness\": 0.8}\n"
+        f"{gold_block}"
+        "If a gold_answer is provided, also score:\n"
+        "- correctness: is the answer consistent with the gold answer?\n\n"
+        "Return only JSON like: {\"retrieval_relevance\": 0.7, \"answer_relevance\": 0.7, \"groundedness\": 0.8, \"correctness\": 0.7}\n"
     )
 
     model = os.getenv("OPENAI_EVAL_MODEL", "gpt-5.2")
@@ -117,7 +131,7 @@ def llm_judge(question: str, answer: str, retrieved: Iterable[Dict[str, Any]]) -
     try:
         return json.loads(raw)
     except Exception:
-        return {"retrieval_relevance": None, "answer_relevance": None, "groundedness": None, "raw": raw}
+        return {"retrieval_relevance": None, "answer_relevance": None, "groundedness": None, "correctness": None, "raw": raw}
 
 
 def maybe_log_langsmith(cases: List[Dict[str, Any]]) -> None:
@@ -125,13 +139,17 @@ def maybe_log_langsmith(cases: List[Dict[str, Any]]) -> None:
         return
     try:
         from langsmith import Client
+        from langsmith.utils import LangSmithConflictError
     except Exception:
         print("LangSmith not installed. Skipping LangSmith logging.")
         return
 
     client = Client()
     dataset_name = os.getenv("LANGSMITH_PROJECT", "opsrelay-rag-evals")
-    dataset = client.create_dataset(dataset_name=dataset_name)
+    try:
+        dataset = client.create_dataset(dataset_name=dataset_name)
+    except LangSmithConflictError:
+        dataset = client.read_dataset(dataset_name=dataset_name)
     for row in cases:
         client.create_example(
             inputs={"question": row["question"]},
@@ -144,6 +162,7 @@ def maybe_log_langsmith(cases: List[Dict[str, Any]]) -> None:
         )
 
 
+@traceable(run_type="chain", name="RAG Eval Run")
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run local RAG evaluation")
     parser.add_argument("--dataset", required=True, help="Path to eval JSONL")
@@ -158,13 +177,15 @@ def main() -> None:
     dataset_path = Path(args.dataset)
     cases = load_cases(dataset_path)
     results_payload = []
+    client = Client()
 
+    failures = []
     with get_db_context() as db:
         for case in cases:
             query_embedding = embed_text(case.question)
             retrieved = find_similar_runbook_chunks(db, query_embedding, case.question, limit=args.limit)
             answer = llm_answer(case.question, retrieved)
-            metrics = llm_judge(case.question, answer, retrieved)
+            metrics = llm_judge(case.question, answer, retrieved, case.gold_answer)
 
             results_payload.append({
                 "id": case.id,
@@ -181,10 +202,34 @@ def main() -> None:
                 "metrics": metrics,
             })
 
-            print(f"[{case.id}] retrieval_relevance={metrics.get('retrieval_relevance')} groundedness={metrics.get('groundedness')}")
+            retrieval_relevance = metrics.get("retrieval_relevance")
+            groundedness = metrics.get("groundedness")
+            answer_relevance = metrics.get("answer_relevance")
+            correctness = metrics.get("correctness")
+            print(
+                f"[{case.id}] retrieval_relevance={retrieval_relevance} "
+                f"answer_relevance={answer_relevance} groundedness={groundedness} correctness={correctness}"
+            )
+
+            if any(
+                score is not None and score < 0.6
+                for score in [retrieval_relevance, answer_relevance, groundedness, correctness]
+            ):
+                failures.append(case.id)
 
     if args.log_langsmith:
         maybe_log_langsmith(results_payload)
+    try:
+        client.flush()
+    except Exception:
+        pass
+
+    if failures:
+        print("\nFailures (score < 0.6):")
+        for case_id in failures:
+            print(f"- {case_id}")
+    else:
+        print("\nAll evals passed (>= 0.6).")
 
 
 if __name__ == "__main__":

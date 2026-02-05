@@ -122,6 +122,22 @@ With defaults:
 
 If `RAG_MIN_KEYWORD_OVERLAP = 0.05` and `RAG_MIN_SCORE = 0.1`, this chunk is retained.
 
+## Evals
+### Metrics
+- `retrieval_relevance`: LLM judge checks if retrieved chunks are relevant to the question.
+- `answer_relevance`: LLM judge checks if the answer addresses the question.
+- `groundedness`: LLM judge checks if the answer is supported by retrieved chunks.
+- `correctness`: LLM judge checks consistency with a gold answer when provided.
+
+### Methodology
+- Eval runner: `backend/tools/run_rag_eval.py`
+- Dataset: `datasets/evals/rag_eval_cases.jsonl`
+- For each case:
+  - Retrieve top-k runbook chunks.
+  - Generate an answer using retrieved context only.
+  - Score relevance/groundedness/correctness with an OpenAI judge.
+- Failure summary lists any cases with a score < `0.6`.
+
 ## Core Components
 - Webhook API: Receives alerts, verifies signatures, stores raw payloads.
 - Database: PostgreSQL + pgvector; primary store for alerts/incidents/chunks.

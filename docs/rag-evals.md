@@ -8,6 +8,11 @@ quality. It can optionally report runs to LangSmith when API keys are present.
 - Answer relevance: does the answer address the question?
 - Groundedness: is the answer supported by retrieved chunks?
 
+## Tracing
+The eval runner is annotated with `@traceable` and wraps OpenAI calls with
+`wrap_openai` so each retrieval + generation + judge step is traced in LangSmith
+when `LANGSMITH_TRACING=true`.
+
 ## Required API Keys
 All evaluations require:
 - `OPENAI_API_KEY`
@@ -63,3 +68,4 @@ Each line is JSON with fields:
 - `expected_source_document`: expected runbook filename
 - `expected_contains`: short phrase expected in a relevant chunk
 - `expected_answer_contains`: phrase expected in a good answer (optional)
+- `gold_answer`: reference answer for correctness scoring (optional)
