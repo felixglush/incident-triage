@@ -104,6 +104,7 @@ class Alert(Base):
     region = Column(String(50))
     error_code = Column(String(100))
     entity_source = Column(String(50), index=True)
+    entity_sources = Column(JSONB, nullable=True)
 
     # Soft delete flag
     deleted_at = Column(DateTime(timezone=True))

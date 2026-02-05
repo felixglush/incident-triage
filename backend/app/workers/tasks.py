@@ -106,19 +106,35 @@ def process_alert(self, alert_id: int):
             alert.environment = entities.get("environment")
             alert.region = entities.get("region")
             alert.error_code = entities.get("error_code")
-            alert.entity_source = entities.get("entity_source") or "regex"
+
+            entity_sources = {}
+            if alert.service_name:
+                entity_sources["service_name"] = "ml"
+            if alert.environment:
+                entity_sources["environment"] = "ml"
+            if alert.region:
+                entity_sources["region"] = "ml"
+            if alert.error_code:
+                entity_sources["error_code"] = "ml"
 
             logger.debug(f"Extracted entities: {entities}")
 
             # Fill any missing entity fields from tags and mark provenance
-            if _apply_fallback_entities(alert):
-                alert.entity_source = "tags"
+            fallback_fields = _apply_fallback_entities(alert, entity_sources)
+            if fallback_fields:
+                entity_sources.update(fallback_fields)
+            alert.entity_sources = entity_sources or None
+            alert.entity_source = _summarize_entity_source(entity_sources)
 
         except (requests.RequestException, KeyError) as e:
             logger.error(f"Entity extraction failed for alert {alert_id}: {str(e)}")
             # Fallback: best-effort extraction from raw payload tags
-            if _apply_fallback_entities(alert):
-                alert.entity_source = "tags"
+            entity_sources = {}
+            fallback_fields = _apply_fallback_entities(alert, entity_sources)
+            if fallback_fields:
+                entity_sources.update(fallback_fields)
+            alert.entity_sources = entity_sources or None
+            alert.entity_source = _summarize_entity_source(entity_sources)
 
         db.commit()
         logger.debug(f"Alert {alert_id} classified: severity={alert.severity}, team={alert.predicted_team}")
@@ -149,13 +165,13 @@ def process_alert(self, alert_id: int):
         db.close()
 
 
-def _apply_fallback_entities(alert: Alert) -> bool:
+def _apply_fallback_entities(alert: Alert, entity_sources: dict) -> dict:
     """
     Best-effort entity extraction from raw payload when ML service is unavailable.
     """
     payload = alert.raw_payload or {}
     tags = payload.get("tags") or []
-    updated = False
+    updated = {}
 
     # Tags usually look like ["service:api", "env:production", "region:us-east-1"]
     if isinstance(tags, list):
@@ -164,16 +180,16 @@ def _apply_fallback_entities(alert: Alert) -> bool:
                 continue
             if tag.startswith("service:") and not alert.service_name:
                 alert.service_name = tag.split(":", 1)[1]
-                updated = True
+                updated["service_name"] = "tags"
             elif tag.startswith("env:") and not alert.environment:
                 alert.environment = tag.split(":", 1)[1]
-                updated = True
+                updated["environment"] = "tags"
             elif tag.startswith("region:") and not alert.region:
                 alert.region = tag.split(":", 1)[1]
-                updated = True
+                updated["region"] = "tags"
             elif tag.startswith("error:") and not alert.error_code:
                 alert.error_code = tag.split(":", 1)[1]
-                updated = True
+                updated["error_code"] = "tags"
 
     # If no tags, try minimal inference from title
     if not alert.service_name and alert.title:
@@ -181,10 +197,19 @@ def _apply_fallback_entities(alert: Alert) -> bool:
         for candidate in ["api", "db", "cache", "queue", "worker"]:
             if candidate in lowered:
                 alert.service_name = candidate
-                updated = True
+                updated["service_name"] = "title"
                 break
 
     return updated
+
+
+def _summarize_entity_source(entity_sources: dict) -> str:
+    if not entity_sources:
+        return "unknown"
+    unique_sources = set(entity_sources.values())
+    if len(unique_sources) == 1:
+        return unique_sources.pop()
+    return "mixed"
 
 
 def group_alerts_into_incidents(db, alert: Alert) -> int:
