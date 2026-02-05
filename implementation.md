@@ -29,6 +29,7 @@ Goal: Pair new incidents to prior ones and generate next steps.
 - Similarity search service
 - Summarizer endpoint with retrieved context
 - Next-steps generator and storage
+- RAG retrieval improvements + eval suite (LangSmith + gold answers)
 
 ## Phase 4 — Dashboard + Chat UI
 Goal: Provide a dashboard and chat interface for triage.

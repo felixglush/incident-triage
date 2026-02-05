@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Tuple
 
+from sqlalchemy import desc, func
+
 from sqlalchemy.orm import Session
 
 from app.models import Alert, Incident, RunbookChunk
@@ -197,10 +199,9 @@ def find_similar_runbook_chunks(
     query_text: str,
     limit: int = 5,
     min_score: float = MIN_SCORE,
-    min_keyword_overlap: float = MIN_KEYWORD_OVERLAP,
 ) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
-    query_tokens = _tokens(query_text)
+    candidates: Dict[int, Dict[str, Any]] = {}
 
     if HAS_PGVECTOR:
         try:
@@ -213,39 +214,53 @@ def find_similar_runbook_chunks(
                 .all()
             )
             for chunk, dist in rows:
-                chunk_text = " ".join([chunk.title or "", chunk.content or ""]).strip()
-                keyword_score = jaccard_similarity(query_tokens, _tokens(chunk_text))
-                if keyword_score < min_keyword_overlap:
-                    continue
-                vector_score = _similarity_score_from_distance(dist)
-                score = _hybrid_score(vector_score, keyword_score)
-                score += _rerank_boost(query_text, chunk.title, chunk.content)
-                if score < min_score:
-                    continue
-                results.append({
-                    "chunk": chunk,
-                    "score": score,
-                })
-            if results:
-                return results
+                entry = candidates.setdefault(chunk.id, {"chunk": chunk, "vector_score": 0.0, "bm25_score": 0.0})
+                entry["vector_score"] = _similarity_score_from_distance(dist)
         except Exception:
-            results = []
+            pass
 
-    # Fallback: token overlap
-    matches: List[Tuple[RunbookChunk, float]] = []
-    for chunk in db.query(RunbookChunk).filter(RunbookChunk.source == "runbooks").all():
-        chunk_text = " ".join([chunk.title or "", chunk.content or ""]).strip()
-        keyword_score = jaccard_similarity(query_tokens, _tokens(chunk_text))
-        if keyword_score < min_keyword_overlap:
-            continue
-        score = _hybrid_score(0.0, keyword_score)
+    try:
+        ts_query = func.plainto_tsquery("english", query_text)
+        bm25_rows = (
+            db.query(RunbookChunk, func.ts_rank_cd(RunbookChunk.search_tsv, ts_query).label("bm25_score"))
+            .filter(RunbookChunk.search_tsv.isnot(None), RunbookChunk.source == "runbooks")
+            .order_by(desc("bm25_score"))
+            .limit(limit)
+            .all()
+        )
+        for chunk, bm25_score in bm25_rows:
+            entry = candidates.setdefault(chunk.id, {"chunk": chunk, "vector_score": 0.0, "bm25_score": 0.0})
+            entry["bm25_score"] = float(bm25_score or 0.0)
+    except Exception:
+        bm25_rows = []
+
+    if not candidates:
+        matches: List[Tuple[RunbookChunk, float]] = []
+        for chunk in db.query(RunbookChunk).filter(RunbookChunk.source == "runbooks").all():
+            chunk_text = " ".join([chunk.title or "", chunk.content or ""]).strip()
+            keyword_score = jaccard_similarity(_tokens(query_text), _tokens(chunk_text))
+            score = _hybrid_score(0.0, keyword_score)
+            score += _rerank_boost(query_text, chunk.title, chunk.content)
+            if score < min_score:
+                continue
+            matches.append((chunk, score))
+
+        matches.sort(key=lambda item: item[1], reverse=True)
+        for chunk, score in matches[:limit]:
+            results.append({"chunk": chunk, "score": score})
+        return results
+
+    ranked: List[Tuple[RunbookChunk, float]] = []
+    for entry in candidates.values():
+        chunk = entry["chunk"]
+        score = _hybrid_score(entry["vector_score"], entry["bm25_score"])
         score += _rerank_boost(query_text, chunk.title, chunk.content)
         if score < min_score:
             continue
-        matches.append((chunk, score))
+        ranked.append((chunk, min(score, 1.0)))
 
-    matches.sort(key=lambda item: item[1], reverse=True)
-    for chunk, score in matches[:limit]:
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    for chunk, score in ranked[:limit]:
         results.append({"chunk": chunk, "score": score})
 
     return results

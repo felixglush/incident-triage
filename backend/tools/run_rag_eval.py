@@ -169,6 +169,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=5, help="Top-k retrieval")
     parser.add_argument("--env-file", default=".env", help="Optional .env file to load")
     parser.add_argument("--log-langsmith", action="store_true", help="Log to LangSmith if configured")
+    parser.add_argument("--debug", action="store_true", help="Print retrieved chunks and scores")
     args = parser.parse_args()
 
     load_env_file(Path(args.env_file))
@@ -184,6 +185,15 @@ def main() -> None:
         for case in cases:
             query_embedding = embed_text(case.question)
             retrieved = find_similar_runbook_chunks(db, query_embedding, case.question, limit=args.limit)
+            if args.debug:
+                print(f"\n[{case.id}] Query: {case.question}")
+                for idx, item in enumerate(retrieved, start=1):
+                    chunk = item["chunk"]
+                    snippet = (chunk.content or "").replace("\n", " ").strip()[:160]
+                    print(
+                        f"  {idx}. {chunk.source_document} | score={item['score']:.3f} | "
+                        f"title={chunk.title or ''} | {snippet}"
+                    )
             answer = llm_answer(case.question, retrieved)
             metrics = llm_judge(case.question, answer, retrieved, case.gold_answer)
 

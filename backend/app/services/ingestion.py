@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 from typing import Iterable, List, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import RunbookChunk
@@ -110,12 +111,14 @@ def ingest_folder(
                 "version_hash": version_hash,
                 "title": chunk.title,
             }
+            search_text = f"{chunk.title or ''} {chunk.content}".strip()
             db.add(
                 RunbookChunk(
                     source_document=path.name,
                     chunk_index=chunk.chunk_index,
                     title=chunk.title,
                     content=chunk.content,
+                    search_tsv=func.to_tsvector("english", search_text),
                     embedding=embed_text(chunk.content),
                     doc_metadata=metadata,
                     source=source,

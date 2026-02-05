@@ -73,7 +73,7 @@ flowchart LR
   Q["User Query"]
   E["Embed Query"]
   V["Vector Search (pgvector)"]
-  K["Keyword Overlap"]
+  K["BM25 (ts_rank_cd)"]
   C["Blend Scores"]
   R["Rerank + Thresholds"]
   O["Top Chunks + Scores"]
@@ -93,15 +93,15 @@ flowchart LR
 ### Retrieval Mechanics
 - **Vector search:** embed the query and compute L2 distance against stored chunk embeddings.
   - `vector_score = 1 / (1 + l2_distance)`
-- **Keyword overlap:** tokenized Jaccard overlap between query tokens and chunk tokens.
-  - `keyword_score = |tokens_q ∩ tokens_chunk| / |tokens_q ∪ tokens_chunk|`
+- **BM25 keyword score:** computed via PostgreSQL full-text search.
+  - `bm25_score = ts_rank_cd(search_tsv, plainto_tsquery('english', query))`
 - **Hybrid scoring:** blended score:
-  - `hybrid = (vector_score * RAG_VECTOR_WEIGHT) + (keyword_score * RAG_KEYWORD_WEIGHT)`
+  - `hybrid = (vector_score * RAG_VECTOR_WEIGHT) + (bm25_score * RAG_KEYWORD_WEIGHT)`
 - **Reranker:** boosts if the full query string appears in title/content:
   - `rerank = (query_in_title ? RAG_RERANK_TITLE_BOOST : 0) + (query_in_content ? RAG_RERANK_PHRASE_BOOST : 0)`
 - **Final score + thresholds:**
   - `final = min(1.0, hybrid + rerank)`
-  - keep if `keyword_score >= RAG_MIN_KEYWORD_OVERLAP` **and** `final >= RAG_MIN_SCORE`
+  - keep if `final >= RAG_MIN_SCORE`
 
 #### Example
 Query: `"connection pool"`  
@@ -110,17 +110,15 @@ Chunk content contains `"connection pool exhausted errors"`
 
 Assume:
 - `l2_distance = 0.95` → `vector_score = 1 / (1 + 0.95) = 0.5128`
-- `tokens_q = {connection, pool}`
-- `tokens_chunk = {database, connection, pool, saturation, exhausted, errors}`
-- `keyword_score = 2 / 6 = 0.3333`
+- `bm25_score = 0.22`
 
 With defaults:
 - `RAG_VECTOR_WEIGHT = 0.7`, `RAG_KEYWORD_WEIGHT = 0.3`
-- `hybrid = (0.5128 * 0.7) + (0.3333 * 0.3) = 0.4580`
+- `hybrid = (0.5128 * 0.7) + (0.22 * 0.3) = 0.4289`
 - `rerank = 0.08 (title match) + 0.05 (content match) = 0.13`
-- `final = min(1.0, 0.4580 + 0.13) = 0.5880`
+- `final = min(1.0, 0.4289 + 0.13) = 0.5589`
 
-If `RAG_MIN_KEYWORD_OVERLAP = 0.05` and `RAG_MIN_SCORE = 0.1`, this chunk is retained.
+If `RAG_MIN_SCORE = 0.1`, this chunk is retained.
 
 ## Evals
 ### Metrics
