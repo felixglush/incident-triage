@@ -11,7 +11,7 @@ pgvector==0.4.1
 
 # Task queue
 celery==5.5.3
-redis==7.1.0
+redis==7.0.1
 
 # For RAG embeddings only (used in backend/app/api/chat.py)
 sentence-transformers==5.1.2

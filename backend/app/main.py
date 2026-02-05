@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import check_connection
 from app.api import webhooks
+from app.api import incidents, alerts
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,9 @@ app.add_middleware(
 
 # Include API routers
 app.include_router(webhooks.router, prefix="/webhook", tags=["webhooks"])
+app.include_router(incidents.router, prefix="/incidents", tags=["incidents"])
+app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 # TODO: Add more routers as we implement them
-# app.include_router(incidents.router, prefix="/incidents", tags=["incidents"])
 # app.include_router(chat.router, prefix="/chat", tags=["chat"])
 
 
@@ -110,14 +112,4 @@ async def root():
     }
 
 
-# Stub endpoints for alerts and incidents - will be moved to routers later
-@app.get("/alerts")
-async def list_alerts():
-    """List all alerts - stub (will move to app.api.alerts)"""
-    return {"alerts": []}
-
-
-@app.get("/incidents")
-async def list_incidents():
-    """List all incidents - stub (will move to app.api.incidents)"""
-    return {"incidents": []}
+# Stub endpoints removed; use routers instead.
