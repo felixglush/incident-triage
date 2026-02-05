@@ -30,6 +30,10 @@ python backend/tools/run_rag_eval.py \
   --limit 5
 ```
 
+## Optional flags
+- `--fail-under 0.6` exits nonzero if any score falls below the threshold.
+- `--debug` prints retrieved chunks and scores per query.
+
 ## Optional: load private .env
 Create a `.env` file at the repo root (it is ignored by git):
 ```
