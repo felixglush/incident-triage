@@ -3,7 +3,7 @@ Incident API endpoints for reviewing and updating incidents.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -313,8 +313,20 @@ def update_incident_status(
     previous = incident.status
     incident.status = status
 
+    if (
+        previous == IncidentStatus.OPEN
+        and status == IncidentStatus.INVESTIGATING
+        and incident.time_to_acknowledge is None
+        and incident.created_at
+    ):
+        now = datetime.now(timezone.utc)
+        incident.time_to_acknowledge = int((now - incident.created_at).total_seconds())
+
     if status == IncidentStatus.RESOLVED:
         incident.resolved_at = datetime.utcnow()
+        if incident.time_to_resolve is None and incident.created_at:
+            now = datetime.now(timezone.utc)
+            incident.time_to_resolve = int((now - incident.created_at).total_seconds())
     if status == IncidentStatus.CLOSED:
         incident.closed_at = datetime.utcnow()
 

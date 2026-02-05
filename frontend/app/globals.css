@@ -1,0 +1,85 @@
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  @apply h-full;
+}
+
+body {
+  @apply bg-obsidian text-mist font-body;
+}
+
+.gradient-shell {
+  background: radial-gradient(1200px 600px at 70% -10%, rgba(89, 194, 255, 0.12), transparent),
+    radial-gradient(700px 500px at 0% 30%, rgba(242, 92, 92, 0.12), transparent),
+    linear-gradient(160deg, #0b0f14 0%, #101726 60%, #0b0f14 100%);
+}
+
+.glass {
+  background: rgba(18, 25, 36, 0.7);
+  border: 1px solid rgba(200, 208, 216, 0.08);
+  backdrop-filter: blur(18px);
+}
+
+.card {
+  @apply rounded-xl2 shadow-soft;
+}
+
+.badge {
+  @apply px-2 py-1 rounded-full text-xs font-mono uppercase tracking-wide;
+}
+
+.badge-critical {
+  @apply bg-critical/20 text-critical border border-critical/40;
+}
+
+.badge-error {
+  @apply bg-critical/15 text-critical border border-critical/30;
+}
+
+.badge-warning {
+  @apply bg-warning/20 text-warning border border-warning/40;
+}
+
+.badge-info {
+  @apply bg-info/20 text-info border border-info/40;
+}
+
+.badge-success {
+  @apply bg-success/20 text-success border border-success/40;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(200, 208, 216, 0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(200, 208, 216, 0.25);
+}
+
+/* Focus styles */
+:focus-visible {
+  @apply outline-none ring-2 ring-info/50 ring-offset-2 ring-offset-obsidian;
+}

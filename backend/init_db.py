@@ -11,7 +11,7 @@ This script:
 Usage:
     python init_db.py              # Initialize schema only
     python init_db.py --seed       # Initialize with seed data
-    python init_db.py --drop       # WARNING: Drop and recreate
+    python init_db.py --drop --yes # WARNING: Drop and recreate (non-interactive)
 """
 import sys
 import argparse
@@ -24,9 +24,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from sqlalchemy import text
 from app.database import init_db, drop_db, check_connection, engine
 from app.models.database import (
-    Alert, Incident, IncidentAction, RunbookChunk,
+    Alert, Incident, IncidentAction, RunbookChunk, Connector, ConnectorStatus,
     SeverityLevel, IncidentStatus, ActionType
 )
+from app.services.ingestion import ingest_folder
 
 # Configure logging
 logging.basicConfig(
@@ -66,7 +67,7 @@ def create_seed_data():
     logger.info("Creating seed data...")
 
     with get_db_context() as db:
-        # Create sample incident
+        # Create sample incident (open)
         incident = Incident(
             title="Database connection pool exhausted",
             summary="Multiple alerts indicating database connection issues across production services",
@@ -77,6 +78,21 @@ def create_seed_data():
         )
         db.add(incident)
         db.flush()  # Get incident ID
+
+        # Create a resolved incident for MTTR metrics
+        resolved_incident = Incident(
+            title="API latency spike resolved",
+            summary="Latency normalized after scaling API pods",
+            severity=SeverityLevel.WARNING,
+            status=IncidentStatus.RESOLVED,
+            assigned_team="platform",
+            affected_services=["api-gateway"],
+            created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+            resolved_at=datetime.now(timezone.utc) - timedelta(hours=1, minutes=30),
+            time_to_acknowledge=300,
+            time_to_resolve=1800,
+        )
+        db.add(resolved_incident)
 
         # Create sample alerts
         base_time = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -115,49 +131,48 @@ def create_seed_data():
         )
         db.add(action)
 
-        # Create sample runbook chunk
-        chunk = RunbookChunk(
-            source_document="database-troubleshooting.md",
-            chunk_index=0,
-            title="Database Connection Pool Troubleshooting",
-            content="""
-## Symptom: Connection Pool Exhausted
+        # Ingest runbooks + notion mock content
+        runbooks_path = Path(__file__).resolve().parent / "runbooks"
+        runbook_chunks_loaded = ingest_folder(db, runbooks_path, source="runbooks", tags=["runbook"])
 
-When you see "connection pool exhausted" errors:
+        notion_path = Path(__file__).resolve().parent / "datasets" / "notion_mock"
+        notion_chunks_loaded = ingest_folder(db, notion_path, source="notion", tags=["notion"])
 
-1. Check current connections: `SELECT count(*) FROM pg_stat_activity;`
-2. Identify long-running queries: `SELECT pid, now() - query_start as duration, query
-   FROM pg_stat_activity WHERE state = 'active' ORDER BY duration DESC;`
-3. Kill problematic queries if needed: `SELECT pg_terminate_backend(pid);`
-4. Temporarily increase pool size in application config
-5. Check for connection leaks in application code
-
-**Root Causes:**
-- Application not closing connections properly
-- Queries taking longer than expected
-- Sudden traffic spike
-- Too many idle connections
-            """.strip(),
-            doc_metadata={
-                "tags": ["database", "troubleshooting", "connections"],
-                "category": "infrastructure",
-                "priority": "high"
-            }
+        # Backfill search_tsv for BM25 queries
+        db.execute(
+            text(
+                "UPDATE runbook_chunks "
+                "SET search_tsv = to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,'')) "
+                "WHERE source = 'runbooks' AND search_tsv IS NULL"
+            )
         )
-        db.add(chunk)
+
+        # Create sample connectors (only webhooks implemented are connected)
+        connectors = [
+            Connector(id="notion", name="Notion", status=ConnectorStatus.NOT_CONNECTED, detail="Runbook sync"),
+            Connector(id="slack", name="Slack", status=ConnectorStatus.NOT_CONNECTED, detail="Incident channel history"),
+            Connector(id="linear", name="Linear", status=ConnectorStatus.NOT_CONNECTED, detail="Issue context"),
+            Connector(id="datadog", name="Datadog", status=ConnectorStatus.CONNECTED, detail="Metrics and alerts"),
+            Connector(id="sentry", name="Sentry", status=ConnectorStatus.CONNECTED, detail="Error tracking"),
+            Connector(id="pagerduty", name="PagerDuty", status=ConnectorStatus.NOT_CONNECTED, detail="On-call scheduling"),
+        ]
+        db.add_all(connectors)
 
         db.commit()
         logger.info("✓ Seed data created successfully")
         logger.info(f"  - Created incident #{incident.id}")
         logger.info(f"  - Created 3 alerts")
         logger.info(f"  - Created 1 incident action")
-        logger.info(f"  - Created 1 runbook chunk")
+        logger.info(f"  - Created {runbook_chunks_loaded} runbook chunks")
+        logger.info(f"  - Created {notion_chunks_loaded} notion chunks")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Initialize OpsRelay database")
     parser.add_argument("--drop", action="store_true",
                        help="Drop existing tables before creating (WARNING: deletes all data)")
+    parser.add_argument("--yes", action="store_true",
+                       help="Confirm dropping tables without prompting")
     parser.add_argument("--seed", action="store_true",
                        help="Load seed data for testing")
     parser.add_argument("--check-only", action="store_true",
@@ -184,13 +199,17 @@ def main():
     # Step 2: Drop tables if requested
     if args.drop:
         logger.warning("⚠️  DROPPING ALL TABLES...")
-        confirm = input("Are you sure? This will delete all data! (yes/no): ")
-        if confirm.lower() == "yes":
+        if args.yes:
             drop_db()
             logger.info("✓ All tables dropped")
         else:
-            logger.info("Drop cancelled")
-            return
+            confirm = input("Are you sure? This will delete all data! (yes/no): ")
+            if confirm.lower() == "yes":
+                drop_db()
+                logger.info("✓ All tables dropped")
+            else:
+                logger.info("Drop cancelled")
+                return
 
     # Step 3: Enable extensions
     enable_extensions()

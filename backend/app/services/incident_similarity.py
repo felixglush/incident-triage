@@ -7,7 +7,10 @@ while leaving room for future BM25 + vector hybrid retrieval.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Tuple
+
+from sqlalchemy import desc, func
 
 from sqlalchemy.orm import Session
 
@@ -41,7 +44,10 @@ def ensure_incident_embedding(db: Session, incident: Incident, alerts: List[Aler
 
 
 def ensure_runbook_embeddings(db: Session) -> None:
-    chunks = db.query(RunbookChunk).filter(RunbookChunk.embedding.is_(None)).all()
+    chunks = db.query(RunbookChunk).filter(
+        RunbookChunk.embedding.is_(None),
+        RunbookChunk.source == "runbooks",
+    ).all()
     for chunk in chunks:
         text = " ".join([chunk.title or "", chunk.content or ""]).strip()
         chunk.embedding = embed_text(text)
@@ -50,6 +56,30 @@ def ensure_runbook_embeddings(db: Session) -> None:
 
 def _similarity_score_from_distance(distance: float) -> float:
     return 1.0 / (1.0 + float(distance))
+
+
+VECTOR_WEIGHT = float(os.getenv("RAG_VECTOR_WEIGHT", "0.7"))
+KEYWORD_WEIGHT = float(os.getenv("RAG_KEYWORD_WEIGHT", "0.3"))
+MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.1"))
+MIN_KEYWORD_OVERLAP = float(os.getenv("RAG_MIN_KEYWORD_OVERLAP", "0.05"))
+RERANK_TITLE_BOOST = float(os.getenv("RAG_RERANK_TITLE_BOOST", "0.08"))
+RERANK_PHRASE_BOOST = float(os.getenv("RAG_RERANK_PHRASE_BOOST", "0.05"))
+
+
+def _hybrid_score(vector_score: float, keyword_score: float) -> float:
+    return (vector_score * VECTOR_WEIGHT) + (keyword_score * KEYWORD_WEIGHT)
+
+
+def _rerank_boost(query_text: str, title: str | None, content: str | None) -> float:
+    if not query_text:
+        return 0.0
+    lowered = query_text.lower()
+    boost = 0.0
+    if title and lowered in title.lower():
+        boost += RERANK_TITLE_BOOST
+    if content and lowered in content.lower():
+        boost += RERANK_PHRASE_BOOST
+    return boost
 
 
 def _structured_boost(query: Incident, candidate: Incident) -> float:
@@ -83,7 +113,8 @@ def find_similar_incidents(
     incident: Incident,
     alerts: List[Alert],
     limit: int = 5,
-    min_score: float = 0.1,
+    min_score: float = MIN_SCORE,
+    min_keyword_overlap: float = MIN_KEYWORD_OVERLAP,
 ) -> List[Dict[str, Any]]:
     query_embedding = incident.incident_embedding
     if query_embedding is None:
@@ -92,6 +123,8 @@ def find_similar_incidents(
     results: List[Dict[str, Any]] = []
     query_tokens = _tokens(build_incident_text(incident, alerts))
     query_services = set(incident.affected_services or [])
+    if not query_tokens and not query_services:
+        return results
 
     if HAS_PGVECTOR:
         try:
@@ -105,16 +138,22 @@ def find_similar_incidents(
                 .all()
             )
             for match, dist in rows:
-                candidate_tokens = _tokens(build_incident_text(match, []))
+                candidate_text = build_incident_text(match, [])
+                candidate_tokens = _tokens(candidate_text)
                 candidate_services = set(match.affected_services or [])
                 if not _passes_relevance(
                     query_tokens,
                     candidate_tokens,
                     query_services,
                     candidate_services,
+                    min_token_overlap=min_keyword_overlap,
                 ):
                     continue
-                score = _similarity_score_from_distance(dist) + _structured_boost(incident, match)
+                vector_score = _similarity_score_from_distance(dist)
+                keyword_score = jaccard_similarity(query_tokens, candidate_tokens)
+                score = _hybrid_score(vector_score, keyword_score)
+                score += _rerank_boost(build_incident_text(incident, alerts), match.title, match.summary)
+                score += _structured_boost(incident, match)
                 score = min(score, 1.0)
                 if score >= min_score:
                     results.append({
@@ -138,9 +177,12 @@ def find_similar_incidents(
             candidate_tokens,
             query_services,
             candidate_services,
+            min_token_overlap=min_keyword_overlap,
         ):
             continue
-        score = jaccard_similarity(query_tokens, candidate_tokens)
+        keyword_score = jaccard_similarity(query_tokens, candidate_tokens)
+        score = _hybrid_score(0.0, keyword_score)
+        score += _rerank_boost(build_incident_text(incident, alerts), candidate.title, candidate.summary)
         score += _structured_boost(incident, candidate)
         score = min(score, 1.0)
         if score >= min_score:
@@ -158,39 +200,79 @@ def find_similar_runbook_chunks(
     query_embedding: List[float],
     query_text: str,
     limit: int = 5,
+    min_score: float = MIN_SCORE,
 ) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
+    query_tokens = _tokens(query_text)
+    if not query_tokens:
+        return results
+    candidates: Dict[int, Dict[str, Any]] = {}
 
     if HAS_PGVECTOR:
         try:
             distance = RunbookChunk.embedding.l2_distance(query_embedding)
             rows = (
                 db.query(RunbookChunk, distance.label("distance"))
-                .filter(RunbookChunk.embedding.isnot(None))
+                .filter(RunbookChunk.embedding.isnot(None), RunbookChunk.source == "runbooks")
                 .order_by(distance.asc())
                 .limit(limit)
                 .all()
             )
             for chunk, dist in rows:
-                results.append({
-                    "chunk": chunk,
-                    "score": _similarity_score_from_distance(dist),
-                })
-            if results:
-                return results
+                entry = candidates.setdefault(chunk.id, {"chunk": chunk, "vector_score": 0.0, "bm25_score": 0.0})
+                entry["vector_score"] = _similarity_score_from_distance(dist)
         except Exception:
-            results = []
+            pass
 
-    # Fallback: token overlap
-    query_tokens = _tokens(query_text)
-    matches: List[Tuple[RunbookChunk, float]] = []
-    for chunk in db.query(RunbookChunk).all():
-        chunk_text = " ".join([chunk.title or "", chunk.content or ""]).strip()
-        score = jaccard_similarity(query_tokens, _tokens(chunk_text))
-        matches.append((chunk, score))
+    try:
+        if query_text.strip():
+            ts_query = func.plainto_tsquery("english", query_text)
+            bm25_rows = (
+                db.query(RunbookChunk, func.ts_rank_cd(RunbookChunk.search_tsv, ts_query).label("bm25_score"))
+                .filter(
+                    RunbookChunk.search_tsv.isnot(None),
+                    RunbookChunk.source == "runbooks",
+                    RunbookChunk.search_tsv.op("@@")(ts_query),
+                )
+                .order_by(desc("bm25_score"))
+                .limit(limit)
+                .all()
+            )
+            for chunk, bm25_score in bm25_rows:
+                entry = candidates.setdefault(chunk.id, {"chunk": chunk, "vector_score": 0.0, "bm25_score": 0.0})
+                entry["bm25_score"] = float(bm25_score or 0.0)
+        else:
+            bm25_rows = []
+    except Exception:
+        bm25_rows = []
 
-    matches.sort(key=lambda item: item[1], reverse=True)
-    for chunk, score in matches[:limit]:
+    if not candidates:
+        matches: List[Tuple[RunbookChunk, float]] = []
+        for chunk in db.query(RunbookChunk).filter(RunbookChunk.source == "runbooks").all():
+            chunk_text = " ".join([chunk.title or "", chunk.content or ""]).strip()
+            keyword_score = jaccard_similarity(query_tokens, _tokens(chunk_text))
+            score = _hybrid_score(0.0, keyword_score)
+            score += _rerank_boost(query_text, chunk.title, chunk.content)
+            if score < min_score:
+                continue
+            matches.append((chunk, score))
+
+        matches.sort(key=lambda item: item[1], reverse=True)
+        for chunk, score in matches[:limit]:
+            results.append({"chunk": chunk, "score": score})
+        return results
+
+    ranked: List[Tuple[RunbookChunk, float]] = []
+    for entry in candidates.values():
+        chunk = entry["chunk"]
+        score = _hybrid_score(entry["vector_score"], entry["bm25_score"])
+        score += _rerank_boost(query_text, chunk.title, chunk.content)
+        if score < min_score:
+            continue
+        ranked.append((chunk, min(score, 1.0)))
+
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    for chunk, score in ranked[:limit]:
         results.append({"chunk": chunk, "score": score})
 
     return results

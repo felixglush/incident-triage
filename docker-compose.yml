@@ -29,6 +29,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: prod
     ports:
       - "8000:8000"
     environment:
@@ -47,6 +48,13 @@ services:
         condition: service_started
     volumes:
       - ./backend:/app
+      - ./datasets:/datasets
+      - ./datasets:/app/datasets
+      - ./runbooks:/app/runbooks
+      - ./tests:/app/tests
+    env_file:
+      - .env
+
 
   ml-service:
     build:
@@ -62,6 +70,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: prod
     command: celery -A app.workers.celery_app worker --loglevel=info
     environment:
       DATABASE_URL: postgresql://user:password@postgres:5432/opsrelay
@@ -78,6 +87,44 @@ services:
         condition: service_started
     volumes:
       - ./backend:/app
+      - ./datasets:/datasets
+      - ./datasets:/app/datasets
+      - ./runbooks:/app/runbooks
+      - ./tests:/app/tests
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3000"
+    environment:
+      # Don't set NEXT_PUBLIC_API_BASE_URL - use relative URLs through Next.js proxy
+      OPSRELAY_API_BASE_URL: http://backend:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      backend:
+        condition: service_started
+
+  eval-runner:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: dev
+    command: python /app/tools/run_rag_eval.py --dataset /app/datasets/evals/rag_eval_cases.jsonl --limit 5 --log-langsmith
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://user:password@postgres:5432/opsrelay
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - ./datasets:/app/datasets
+      - ./runbooks:/app/runbooks
 
 volumes:
   postgres_data:

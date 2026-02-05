@@ -5,7 +5,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from datetime import datetime, timezone
 import enum
 
@@ -34,6 +34,11 @@ class IncidentStatus(str, enum.Enum):
     RESOLVED = "resolved"
     CLOSED = "closed"
 
+
+class ConnectorStatus(str, enum.Enum):
+    """Connector lifecycle statuses"""
+    CONNECTED = "connected"
+    NOT_CONNECTED = "not_connected"
 
 class ActionType(str, enum.Enum):
     """Types of incident actions for audit trail"""
@@ -367,10 +372,13 @@ class RunbookChunk(Base):
     # Document source tracking
     source_document = Column(String(500), nullable=False, index=True)
     chunk_index = Column(Integer, nullable=False)
+    source = Column(String(50), nullable=False, default="runbooks", index=True)
+    source_uri = Column(String(500))
 
     # Content
     title = Column(String(500))
     content = Column(Text, nullable=False)
+    search_tsv = Column(TSVECTOR)
 
     # Vector embedding for similarity search
     # Using 384 dimensions for all-MiniLM-L6-v2 model
@@ -392,14 +400,13 @@ class RunbookChunk(Base):
     # Table-level constraints and indexes
     __table_args__ = (
         # Unique constraint to prevent duplicate chunks
-        UniqueConstraint("source_document", "chunk_index", name="uq_runbook_doc_chunk"),
+        UniqueConstraint("source_document", "chunk_index", "source", name="uq_runbook_doc_chunk"),
 
         # Index for ordering chunks within a document
         Index("ix_runbook_source_index", "source_document", "chunk_index"),
 
-        # Full-text search index on content
-        Index("ix_runbook_content_fts", "content", postgresql_using="gin",
-              postgresql_ops={"content": "gin_trgm_ops"}),
+        # Full-text search index on tsvector
+        Index("ix_runbook_search_tsv", "search_tsv", postgresql_using="gin"),
 
         # Vector similarity index (only if pgvector available)
         Index("ix_runbook_embedding_vector", "embedding",
@@ -409,6 +416,24 @@ class RunbookChunk(Base):
 
     def __repr__(self):
         return f"<RunbookChunk(id={self.id}, document={self.source_document}, chunk={self.chunk_index})>"
+
+
+class Connector(Base):
+    """
+    Connector model stores third-party integration status.
+    """
+    __tablename__ = "connectors"
+
+    id = Column(String(100), primary_key=True)
+    name = Column(String(200), nullable=False)
+    status = Column(Enum(ConnectorStatus), default=ConnectorStatus.NOT_CONNECTED, nullable=False, index=True)
+    detail = Column(String(500))
+
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    def __repr__(self):
+        return f"<Connector(id={self.id}, status={self.status})>"
 
 
 # SQLAlchemy event listeners for automatic timestamp updates
