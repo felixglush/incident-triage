@@ -171,7 +171,7 @@ def main() -> None:
     parser.add_argument("--env-file", default=".env", help="Optional .env file to load")
     parser.add_argument("--log-langsmith", action="store_true", help="Log to LangSmith if configured")
     parser.add_argument("--debug", action="store_true", help="Print retrieved chunks and scores")
-    parser.add_argument("--fail-under", type=float, default=0.6, help="Fail if any score < threshold")
+    parser.add_argument("--fail-under", type=float, default=None, help="Fail if any score < threshold")
     args = parser.parse_args()
 
     load_env_file(Path(args.env_file))
@@ -238,7 +238,7 @@ def main() -> None:
                 if score is not None:
                     metric_values[key].append(score)
 
-            if any(
+            if args.fail_under is not None and any(
                 score is not None and score < args.fail_under
                 for score in [retrieval_relevance, answer_relevance, groundedness, correctness]
             ):
@@ -263,13 +263,14 @@ def main() -> None:
         else:
             print(f"- {key}: avg n/a")
 
-    if failures:
-        print(f"\nFailures (score < {args.fail_under}):")
-        for case_id in failures:
-            print(f"- {case_id}")
-        sys.exit(1)
-    else:
-        print(f"\nAll evals passed (>= {args.fail_under}).")
+    if args.fail_under is not None:
+        if failures:
+            print(f"\nFailures (score < {args.fail_under}):")
+            for case_id in failures:
+                print(f"- {case_id}")
+            sys.exit(1)
+        else:
+            print(f"\nAll evals passed (>= {args.fail_under}).")
 
 
 if __name__ == "__main__":

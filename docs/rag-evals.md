@@ -31,7 +31,7 @@ python backend/tools/run_rag_eval.py \
 ```
 
 ## Optional flags
-- `--fail-under 0.6` exits nonzero if any score falls below the threshold.
+- `--fail-under 0.6` exits nonzero if any score falls below the threshold (only enforced when provided).
 - `--debug` prints retrieved chunks and scores per query.
 
 ## Optional: load private .env
