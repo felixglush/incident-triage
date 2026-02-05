@@ -27,10 +27,13 @@ def serialize_alert(alert: Alert):
         "severity": alert.severity.value if alert.severity else None,
         "predicted_team": alert.predicted_team,
         "confidence_score": alert.confidence_score,
+        "classification_source": alert.classification_source,
         "service_name": alert.service_name,
         "environment": alert.environment,
         "region": alert.region,
         "error_code": alert.error_code,
+        "entity_source": alert.entity_source,
+        "entity_sources": alert.entity_sources,
         "incident_id": alert.incident_id,
         "created_at": alert.created_at.isoformat() if alert.created_at else None,
     }
