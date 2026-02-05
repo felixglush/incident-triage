@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+from statistics import mean
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -170,6 +171,7 @@ def main() -> None:
     parser.add_argument("--env-file", default=".env", help="Optional .env file to load")
     parser.add_argument("--log-langsmith", action="store_true", help="Log to LangSmith if configured")
     parser.add_argument("--debug", action="store_true", help="Print retrieved chunks and scores")
+    parser.add_argument("--fail-under", type=float, default=None, help="Fail if any score < threshold")
     args = parser.parse_args()
 
     load_env_file(Path(args.env_file))
@@ -181,6 +183,12 @@ def main() -> None:
     client = Client()
 
     failures = []
+    metric_values: Dict[str, List[float]] = {
+        "retrieval_relevance": [],
+        "answer_relevance": [],
+        "groundedness": [],
+        "correctness": [],
+    }
     with get_db_context() as db:
         for case in cases:
             query_embedding = embed_text(case.question)
@@ -221,8 +229,17 @@ def main() -> None:
                 f"answer_relevance={answer_relevance} groundedness={groundedness} correctness={correctness}"
             )
 
-            if any(
-                score is not None and score < 0.6
+            for key, score in [
+                ("retrieval_relevance", retrieval_relevance),
+                ("answer_relevance", answer_relevance),
+                ("groundedness", groundedness),
+                ("correctness", correctness),
+            ]:
+                if score is not None:
+                    metric_values[key].append(score)
+
+            if args.fail_under is not None and any(
+                score is not None and score < args.fail_under
                 for score in [retrieval_relevance, answer_relevance, groundedness, correctness]
             ):
                 failures.append(case.id)
@@ -234,12 +251,26 @@ def main() -> None:
     except Exception:
         pass
 
-    if failures:
-        print("\nFailures (score < 0.6):")
-        for case_id in failures:
-            print(f"- {case_id}")
-    else:
-        print("\nAll evals passed (>= 0.6).")
+    total_cases = len(cases)
+    passed_cases = total_cases - len(failures)
+    pass_rate = (passed_cases / total_cases) * 100 if total_cases else 0.0
+
+    print("\nSummary:")
+    print(f"- Cases: {passed_cases}/{total_cases} passed ({pass_rate:.1f}%)")
+    for key, values in metric_values.items():
+        if values:
+            print(f"- {key}: avg {mean(values):.2f}")
+        else:
+            print(f"- {key}: avg n/a")
+
+    if args.fail_under is not None:
+        if failures:
+            print(f"\nFailures (score < {args.fail_under}):")
+            for case_id in failures:
+                print(f"- {case_id}")
+            sys.exit(1)
+        else:
+            print(f"\nAll evals passed (>= {args.fail_under}).")
 
 
 if __name__ == "__main__":
