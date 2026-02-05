@@ -220,17 +220,24 @@ def find_similar_runbook_chunks(
             pass
 
     try:
-        ts_query = func.plainto_tsquery("english", query_text)
-        bm25_rows = (
-            db.query(RunbookChunk, func.ts_rank_cd(RunbookChunk.search_tsv, ts_query).label("bm25_score"))
-            .filter(RunbookChunk.search_tsv.isnot(None), RunbookChunk.source == "runbooks")
-            .order_by(desc("bm25_score"))
-            .limit(limit)
-            .all()
-        )
-        for chunk, bm25_score in bm25_rows:
-            entry = candidates.setdefault(chunk.id, {"chunk": chunk, "vector_score": 0.0, "bm25_score": 0.0})
-            entry["bm25_score"] = float(bm25_score or 0.0)
+        if query_text.strip():
+            ts_query = func.plainto_tsquery("english", query_text)
+            bm25_rows = (
+                db.query(RunbookChunk, func.ts_rank_cd(RunbookChunk.search_tsv, ts_query).label("bm25_score"))
+                .filter(
+                    RunbookChunk.search_tsv.isnot(None),
+                    RunbookChunk.source == "runbooks",
+                    RunbookChunk.search_tsv.op("@@")(ts_query),
+                )
+                .order_by(desc("bm25_score"))
+                .limit(limit)
+                .all()
+            )
+            for chunk, bm25_score in bm25_rows:
+                entry = candidates.setdefault(chunk.id, {"chunk": chunk, "vector_score": 0.0, "bm25_score": 0.0})
+                entry["bm25_score"] = float(bm25_score or 0.0)
+        else:
+            bm25_rows = []
     except Exception:
         bm25_rows = []
 
