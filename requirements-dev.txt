@@ -20,3 +20,8 @@ testing.postgresql==1.3.0
 
 # Coverage Reporting
 coverage[toml]==7.10.7
+
+# RAG Evaluation (LangSmith / OpenEvals)
+langsmith==0.4.37
+openevals==0.1.0
+openai==2.16.0
