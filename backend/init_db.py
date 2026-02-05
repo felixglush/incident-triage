@@ -27,6 +27,7 @@ from app.models.database import (
     Alert, Incident, IncidentAction, RunbookChunk, Connector, ConnectorStatus,
     SeverityLevel, IncidentStatus, ActionType
 )
+from app.services.ingestion import ingest_folder
 
 # Configure logging
 logging.basicConfig(
@@ -56,39 +57,6 @@ def enable_extensions():
             logger.error(f"Error enabling extensions: {e}")
             logger.warning("Continuing without extensions...")
             conn.rollback()
-
-
-def load_runbooks_from_file(db, path: Path) -> int:
-    if not path.exists():
-        return 0
-
-    import json
-    with path.open("r") as f:
-        runbooks = json.load(f)
-
-    count = 0
-    for runbook in runbooks:
-        source_document = f"{runbook['id']}.md"
-        tags = runbook.get("tags", [])
-        category = runbook.get("category")
-        chunks = runbook.get("chunks", [])
-        for idx, chunk in enumerate(chunks):
-            db.add(
-                RunbookChunk(
-                    source_document=source_document,
-                    chunk_index=idx,
-                    title=runbook.get("title"),
-                    content=chunk.get("content", ""),
-                    doc_metadata={
-                        "tags": tags,
-                        "category": category,
-                        "source_title": runbook.get("title"),
-                    },
-                )
-            )
-            count += 1
-
-    return count
 
 
 def create_seed_data():
@@ -163,41 +131,21 @@ def create_seed_data():
         )
         db.add(action)
 
-        # Load sample runbooks if available
-        runbooks_path = Path(__file__).resolve().parents[1] / "datasets" / "sample_runbooks.json"
-        runbook_chunks_loaded = load_runbooks_from_file(db, runbooks_path)
-        if runbook_chunks_loaded == 0:
-            # Fallback runbook chunk
-            chunk = RunbookChunk(
-                source_document="database-troubleshooting.md",
-                chunk_index=0,
-                title="Database Connection Pool Troubleshooting",
-                content="""
-## Symptom: Connection Pool Exhausted
+        # Ingest runbooks + notion mock content
+        runbooks_path = Path(__file__).resolve().parent / "runbooks"
+        runbook_chunks_loaded = ingest_folder(db, runbooks_path, source="runbooks", tags=["runbook"])
 
-When you see "connection pool exhausted" errors:
+        notion_path = Path(__file__).resolve().parent / "datasets" / "notion_mock"
+        notion_chunks_loaded = ingest_folder(db, notion_path, source="notion", tags=["notion"])
 
-1. Check current connections: `SELECT count(*) FROM pg_stat_activity;`
-2. Identify long-running queries: `SELECT pid, now() - query_start as duration, query
-   FROM pg_stat_activity WHERE state = 'active' ORDER BY duration DESC;`
-3. Kill problematic queries if needed: `SELECT pg_terminate_backend(pid);`
-4. Temporarily increase pool size in application config
-5. Check for connection leaks in application code
-
-**Root Causes:**
-- Application not closing connections properly
-- Queries taking longer than expected
-- Sudden traffic spike
-- Too many idle connections
-                """.strip(),
-                doc_metadata={
-                    "tags": ["database", "troubleshooting", "connections"],
-                    "category": "infrastructure",
-                    "priority": "high"
-                }
+        # Backfill search_tsv for BM25 queries
+        db.execute(
+            text(
+                "UPDATE runbook_chunks "
+                "SET search_tsv = to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,'')) "
+                "WHERE source = 'runbooks' AND search_tsv IS NULL"
             )
-            db.add(chunk)
-            runbook_chunks_loaded = 1
+        )
 
         # Create sample connectors (only webhooks implemented are connected)
         connectors = [
@@ -216,6 +164,7 @@ When you see "connection pool exhausted" errors:
         logger.info(f"  - Created 3 alerts")
         logger.info(f"  - Created 1 incident action")
         logger.info(f"  - Created {runbook_chunks_loaded} runbook chunks")
+        logger.info(f"  - Created {notion_chunks_loaded} notion chunks")
 
 
 def main():

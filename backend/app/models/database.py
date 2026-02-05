@@ -5,7 +5,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from datetime import datetime, timezone
 import enum
 
@@ -372,10 +372,13 @@ class RunbookChunk(Base):
     # Document source tracking
     source_document = Column(String(500), nullable=False, index=True)
     chunk_index = Column(Integer, nullable=False)
+    source = Column(String(50), nullable=False, default="runbooks", index=True)
+    source_uri = Column(String(500))
 
     # Content
     title = Column(String(500))
     content = Column(Text, nullable=False)
+    search_tsv = Column(TSVECTOR)
 
     # Vector embedding for similarity search
     # Using 384 dimensions for all-MiniLM-L6-v2 model
@@ -397,14 +400,13 @@ class RunbookChunk(Base):
     # Table-level constraints and indexes
     __table_args__ = (
         # Unique constraint to prevent duplicate chunks
-        UniqueConstraint("source_document", "chunk_index", name="uq_runbook_doc_chunk"),
+        UniqueConstraint("source_document", "chunk_index", "source", name="uq_runbook_doc_chunk"),
 
         # Index for ordering chunks within a document
         Index("ix_runbook_source_index", "source_document", "chunk_index"),
 
-        # Full-text search index on content
-        Index("ix_runbook_content_fts", "content", postgresql_using="gin",
-              postgresql_ops={"content": "gin_trgm_ops"}),
+        # Full-text search index on tsvector
+        Index("ix_runbook_search_tsv", "search_tsv", postgresql_using="gin"),
 
         # Vector similarity index (only if pgvector available)
         Index("ix_runbook_embedding_vector", "embedding",

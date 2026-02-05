@@ -10,6 +10,8 @@ import { formatDateTime, formatTime } from "../../../lib/format";
 import type {
   IncidentDetailResponse,
   SimilarIncidentResponse,
+  RunbookSearchItem,
+  RunbookSearchResponse,
 } from "../../../lib/types";
 
 const statusNext: Record<string, string | null> = {
@@ -24,7 +26,7 @@ export default function Page() {
   const incidentId = Array.isArray(params?.id) ? params.id[0] : params?.id;
   const [detail, setDetail] = useState<IncidentDetailResponse | null>(null);
   const [similar, setSimilar] = useState<SimilarIncidentResponse | null>(null);
-  const [runbooks, setRunbooks] = useState<{ id: string; title: string; source: string }[]>([]);
+  const [runbooks, setRunbooks] = useState<RunbookSearchItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusUpdating, setStatusUpdating] = useState(false);
 
@@ -35,12 +37,25 @@ export default function Page() {
     Promise.all([
       apiFetch<IncidentDetailResponse>(`/api/opsrelay/incidents/${incidentId}`),
       apiFetch<SimilarIncidentResponse>(`/api/opsrelay/incidents/${incidentId}/similar?limit=5`),
-      apiFetch<{ items: { id: string; title: string; source: string }[] }>(`/api/opsrelay/runbooks?limit=5`),
     ])
-      .then(([detailRes, similarRes, runbookRes]) => {
+      .then(async ([detailRes, similarRes]) => {
         if (!isMounted) return;
         setDetail(detailRes);
         setSimilar(similarRes);
+        const queryParts = [
+          detailRes.incident.title,
+          detailRes.incident.summary,
+          (detailRes.incident.affected_services || []).join(" "),
+        ].filter(Boolean);
+        const query = queryParts.join(" ").trim();
+        if (!query) {
+          setRunbooks([]);
+          return;
+        }
+        const runbookRes = await apiFetch<RunbookSearchResponse>(
+          `/api/opsrelay/runbooks/search?q=${encodeURIComponent(query)}&limit=5`,
+        );
+        if (!isMounted) return;
         setRunbooks(runbookRes.items || []);
       })
       .catch(() => {
@@ -80,9 +95,12 @@ export default function Page() {
       label: `INC-${item.id}`,
       href: `/incidents/${item.id}`,
     }));
-    if (runbooks.length > 0) {
-      refs.push({ label: "Runbooks", href: "/runbooks" });
-    }
+    runbooks.forEach((item) => {
+      refs.push({
+        label: item.title || item.source_document,
+        href: "/runbooks",
+      });
+    });
     return refs;
   }, [similar, runbooks]);
 
@@ -214,10 +232,13 @@ export default function Page() {
                 >
                   <div className="min-w-0">
                     <p className="text-sm text-white group-hover:text-accent transition-colors">
-                      {item.title}
+                      {item.title || item.source_document}
                     </p>
-                    <span className="text-xs font-mono text-mist/50">{item.source}</span>
+                    <span className="text-xs font-mono text-mist/50">{item.source_document}</span>
                   </div>
+                  <span className="text-xs text-info flex-shrink-0">
+                    {item.score.toFixed(2)}
+                  </span>
                 </a>
               ))}
             </div>
