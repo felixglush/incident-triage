@@ -123,6 +123,8 @@ def find_similar_incidents(
     results: List[Dict[str, Any]] = []
     query_tokens = _tokens(build_incident_text(incident, alerts))
     query_services = set(incident.affected_services or [])
+    if not query_tokens and not query_services:
+        return results
 
     if HAS_PGVECTOR:
         try:
@@ -201,6 +203,9 @@ def find_similar_runbook_chunks(
     min_score: float = MIN_SCORE,
 ) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
+    query_tokens = _tokens(query_text)
+    if not query_tokens:
+        return results
     candidates: Dict[int, Dict[str, Any]] = {}
 
     if HAS_PGVECTOR:
@@ -245,7 +250,7 @@ def find_similar_runbook_chunks(
         matches: List[Tuple[RunbookChunk, float]] = []
         for chunk in db.query(RunbookChunk).filter(RunbookChunk.source == "runbooks").all():
             chunk_text = " ".join([chunk.title or "", chunk.content or ""]).strip()
-            keyword_score = jaccard_similarity(_tokens(query_text), _tokens(chunk_text))
+            keyword_score = jaccard_similarity(query_tokens, _tokens(chunk_text))
             score = _hybrid_score(0.0, keyword_score)
             score += _rerank_boost(query_text, chunk.title, chunk.content)
             if score < min_score:
