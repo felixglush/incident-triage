@@ -18,6 +18,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.workers.celery_app import celery_app
 from app.database import SessionLocal
 from app.models.database import Alert, Incident, IncidentAction, SeverityLevel, IncidentStatus, ActionType
+from app.services.incident_similarity import ensure_incident_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ def process_alert(self, alert_id: int):
             alert.environment = entities.get("environment")
             alert.region = entities.get("region")
             alert.error_code = entities.get("error_code")
+            alert.entity_source = entities.get("entity_source") or "regex"
 
             entity_sources = {}
             if alert.service_name:
@@ -141,6 +143,18 @@ def process_alert(self, alert_id: int):
 
         # Group alert into incident
         incident_id = group_alerts_into_incidents(db, alert)
+
+        # Update incident embedding after grouping
+        incident = db.query(Incident).filter(Incident.id == incident_id).first()
+        if incident:
+            alerts = (
+                db.query(Alert)
+                .filter(Alert.incident_id == incident.id)
+                .order_by(Alert.alert_timestamp.desc())
+                .all()
+            )
+            ensure_incident_embedding(db, incident, alerts)
+            db.commit()
 
         logger.info(f"Alert {alert_id} processed successfully, incident_id={incident_id}")
 
@@ -202,7 +216,6 @@ def _apply_fallback_entities(alert: Alert, entity_sources: dict) -> dict:
 
     return updated
 
-
 def _summarize_entity_source(entity_sources: dict) -> str:
     if not entity_sources:
         return "unknown"
@@ -210,7 +223,6 @@ def _summarize_entity_source(entity_sources: dict) -> str:
     if len(unique_sources) == 1:
         return unique_sources.pop()
     return "mixed"
-
 
 def group_alerts_into_incidents(db, alert: Alert) -> int:
     """
