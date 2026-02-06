@@ -14,7 +14,7 @@ import sys
 from statistics import mean
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -23,18 +23,25 @@ from langsmith import traceable, Client
 from langsmith.wrappers import wrap_openai
 
 from app.database import get_db_context
+from app.models import Alert
 from app.services.embeddings import embed_text
 from app.services.incident_similarity import find_similar_runbook_chunks
+from app.services.chat_orchestrator import run_chat_turn
+from app.models import Incident, SeverityLevel, IncidentStatus
 
 
 @dataclass
 class EvalCase:
     id: str
-    question: str
-    expected_source_document: str
-    expected_contains: str
+    question: str | None = None
+    expected_source_document: str | None = None
+    expected_contains: str | None = None
     expected_answer_contains: str | None = None
     gold_answer: str | None = None
+    mode: str = "rag_single"
+    incident_id: int | None = None
+    turns: list[dict[str, Any]] | None = None
+    create_incident: dict[str, Any] | None = None
 
 
 def load_cases(path: Path) -> List[EvalCase]:
@@ -43,8 +50,19 @@ def load_cases(path: Path) -> List[EvalCase]:
         if not line.strip():
             continue
         payload = json.loads(line)
+        payload.setdefault("mode", "rag_single")
         cases.append(EvalCase(**payload))
     return cases
+
+
+def _coerce_severity(value: str | None) -> SeverityLevel:
+    raw = (value or "warning").strip().lower()
+    return SeverityLevel(raw)
+
+
+def _coerce_status(value: str | None) -> IncidentStatus:
+    raw = (value or "open").strip().lower()
+    return IncidentStatus(raw)
 
 
 def load_env_file(path: Path) -> None:
@@ -55,9 +73,77 @@ def load_env_file(path: Path) -> None:
 def build_context(retrieved: Iterable[Dict[str, Any]]) -> str:
     context = []
     for item in retrieved:
-        chunk = item["chunk"]
-        context.append(f"[{chunk.source_document}] {chunk.title or ''}\n{chunk.content}")
+        if "chunk" in item:
+            chunk = item["chunk"]
+            context.append(f"[{chunk.source_document}] {chunk.title or ''}\n{chunk.content}")
+            continue
+        source = item.get("source_document") or item.get("source") or "context"
+        title = item.get("title") or ""
+        text = item.get("text") or item.get("content") or ""
+        context.append(f"[{source}] {title}\n{text}".strip())
     return "\n\n".join(context)
+
+
+def build_chat_judge_context(db, citations: list[dict[str, Any]], runbook_chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    contexts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for item in runbook_chunks:
+        chunk = item.get("chunk")
+        if not chunk:
+            continue
+        key = f"runbook:{chunk.source_document}:{chunk.chunk_index}"
+        if key in seen:
+            continue
+        seen.add(key)
+        contexts.append(
+            {
+                "source": chunk.source_document,
+                "title": chunk.title or "",
+                "text": chunk.content or "",
+            }
+        )
+
+    for cite in citations:
+        cite_type = cite.get("type")
+        if cite_type == "alert":
+            alert_id = cite.get("id")
+            if not alert_id:
+                continue
+            key = f"alert:{alert_id}"
+            if key in seen:
+                continue
+            alert = db.query(Alert).filter(Alert.id == alert_id).first()
+            if not alert:
+                continue
+            seen.add(key)
+            contexts.append(
+                {
+                    "source": f"alert:{alert.id}",
+                    "title": alert.title or "",
+                    "text": alert.message or "",
+                }
+            )
+        elif cite_type == "incident":
+            incident_id = cite.get("id")
+            if not incident_id:
+                continue
+            key = f"incident:{incident_id}"
+            if key in seen:
+                continue
+            incident = db.query(Incident).filter(Incident.id == incident_id).first()
+            if not incident:
+                continue
+            seen.add(key)
+            contexts.append(
+                {
+                    "source": f"incident:{incident.id}",
+                    "title": incident.title or "",
+                    "text": incident.summary or "",
+                }
+            )
+
+    return contexts
 
 
 @traceable(run_type="llm", name="Generate Answer")
@@ -175,10 +261,11 @@ def main() -> None:
     args = parser.parse_args()
 
     load_env_file(Path(args.env_file))
-    if not os.getenv("OPENAI_API_KEY"):
-        raise SystemExit("OPENAI_API_KEY is required to run evaluations.")
     dataset_path = Path(args.dataset)
     cases = load_cases(dataset_path)
+    requires_llm = any(case.mode != "chat_multiturn" for case in cases)
+    if requires_llm and not os.getenv("OPENAI_API_KEY"):
+        raise SystemExit("OPENAI_API_KEY is required to run LLM-based evaluations.")
     results_payload = []
     client = Client()
 
@@ -191,8 +278,89 @@ def main() -> None:
     }
     with get_db_context() as db:
         for case in cases:
-            query_embedding = embed_text(case.question)
-            retrieved = find_similar_runbook_chunks(db, query_embedding, case.question, limit=args.limit)
+            if case.mode == "chat_multiturn":
+                incident_id: Optional[int] = case.incident_id
+                if incident_id is None and case.create_incident:
+                    payload = case.create_incident
+                    incident = Incident(
+                        title=payload.get("title", "the and of"),
+                        severity=_coerce_severity(payload.get("severity")),
+                        status=_coerce_status(payload.get("status")),
+                        assigned_team=payload.get("assigned_team", "platform"),
+                        affected_services=payload.get("affected_services", []),
+                    )
+                    db.add(incident)
+                    db.commit()
+                    db.refresh(incident)
+                    incident_id = incident.id
+                if incident_id is None:
+                    raise SystemExit(f"{case.id}: incident_id or create_incident is required for chat_multiturn")
+
+                turn_rows = case.turns or []
+                for turn_idx, turn in enumerate(turn_rows, start=1):
+                    question = turn["question"]
+                    turn_result = run_chat_turn(
+                        db,
+                        incident_id=incident_id,
+                        user_message=question,
+                        limit_similar=args.limit,
+                        limit_runbook=args.limit,
+                    )
+                    assistant_text = turn_result.assistant_message
+                    citations_count = len(turn_result.citations)
+                    has_citations = citations_count > 0
+
+                    expected_contains = turn.get("expected_answer_contains")
+                    contains_ok = True
+                    if expected_contains:
+                        contains_ok = expected_contains.lower() in assistant_text.lower()
+
+                    expected_has_citations = turn.get("expected_has_citations")
+                    citations_ok = True
+                    if expected_has_citations is not None:
+                        citations_ok = bool(expected_has_citations) == has_citations
+
+                    llm_metrics: Dict[str, Any] = {}
+                    if os.getenv("OPENAI_API_KEY"):
+                        judge_context = build_chat_judge_context(db, turn_result.citations, turn_result.runbook_chunks)
+                        llm_metrics = llm_judge(
+                            question=question,
+                            answer=assistant_text,
+                            retrieved=judge_context,
+                            gold_answer=turn.get("gold_answer"),
+                        )
+
+                    turn_id = f"{case.id}.turn-{turn_idx}"
+                    passed = contains_ok and citations_ok
+                    print(
+                        f"[{turn_id}] contains_ok={contains_ok} citations_ok={citations_ok} "
+                        f"citations_count={citations_count}"
+                    )
+
+                    results_payload.append(
+                        {
+                            "id": turn_id,
+                            "question": question,
+                            "retrieved_docs": [],
+                            "answer": assistant_text,
+                            "metrics": {
+                                "contains_ok": contains_ok,
+                                "citations_ok": citations_ok,
+                                "citations_count": citations_count,
+                                **llm_metrics,
+                            },
+                        }
+                    )
+                    for key in ["retrieval_relevance", "answer_relevance", "groundedness", "correctness"]:
+                        score = llm_metrics.get(key)
+                        if score is not None:
+                            metric_values[key].append(score)
+                    if not passed:
+                        failures.append(turn_id)
+                continue
+
+            query_embedding = embed_text(case.question or "")
+            retrieved = find_similar_runbook_chunks(db, query_embedding, case.question or "", limit=args.limit)
             if args.debug:
                 print(f"\n[{case.id}] Query: {case.question}")
                 for idx, item in enumerate(retrieved, start=1):
@@ -202,8 +370,8 @@ def main() -> None:
                         f"  {idx}. {chunk.source_document} | score={item['score']:.3f} | "
                         f"title={chunk.title or ''} | {snippet}"
                     )
-            answer = llm_answer(case.question, retrieved)
-            metrics = llm_judge(case.question, answer, retrieved, case.gold_answer)
+            answer = llm_answer(case.question or "", retrieved)
+            metrics = llm_judge(case.question or "", answer, retrieved, case.gold_answer)
 
             results_payload.append({
                 "id": case.id,
