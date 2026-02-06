@@ -359,7 +359,7 @@ def main() -> None:
                         failures.append(turn_id)
                 continue
 
-            query_embedding = embed_text(case.question or "", mode="query")
+            query_embedding = embed_text(case.question or "")
             retrieved = find_similar_runbook_chunks(db, query_embedding, case.question or "", limit=args.limit)
             if args.debug:
                 print(f"\n[{case.id}] Query: {case.question}")

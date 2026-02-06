@@ -8,7 +8,6 @@ from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 
 from app.models import Alert, Incident, SeverityLevel
-from app.services.embeddings import embed_text
 from app.services.incident_similarity import (
     build_incident_text,
     ensure_incident_embedding,
@@ -45,8 +44,7 @@ def _build_next_steps(
 
     if runbook_chunks:
         chunk = runbook_chunks[0]["chunk"]
-        label = chunk.title or chunk.source_document
-        steps.append(f"Check runbook: {label} (chunk {chunk.chunk_index})")
+        steps.append(f"Check runbook: {chunk.source_document} (chunk {chunk.chunk_index})")
 
     if not steps:
         steps.append("Gather additional context from logs and metrics")
@@ -100,14 +98,13 @@ def generate_summary(
             chunk = item["chunk"]
             score = round(item["score"], 3)
             summary_lines.append(
-                f"- {(chunk.title or chunk.source_document)} (chunk {chunk.chunk_index})"
+                f"- {chunk.source_document} (chunk {chunk.chunk_index})"
             )
             citations.append({
                 "type": "runbook",
                 "source_document": chunk.source_document,
                 "chunk_index": chunk.chunk_index,
                 "title": chunk.title,
-                "source_uri": chunk.source_uri,
                 "score": score,
             })
 
@@ -146,13 +143,9 @@ def summarize_incident(
     )
 
     query_text = build_incident_text(incident, alerts, include_summary=False)
-    try:
-        query_embedding = embed_text(query_text, mode="query")
-    except RuntimeError:
-        query_embedding = None
     runbook_chunks = find_similar_runbook_chunks(
         db,
-        query_embedding,
+        incident.incident_embedding,
         query_text,
         limit=limit_runbook,
     )
