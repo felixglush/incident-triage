@@ -57,7 +57,7 @@ def _citation_label(citation: Dict[str, Any], idx: int) -> str:
     if ctype == "alert":
         return f"[{idx}] alert #{citation.get('id')}: {citation.get('title', '')}".strip()
     if ctype == "runbook":
-        source = citation.get("title") or citation.get("source_document", "runbook")
+        source = citation.get("source_document", "runbook")
         chunk = citation.get("chunk_index")
         if chunk is None:
             return f"[{idx}] runbook: {source}"
