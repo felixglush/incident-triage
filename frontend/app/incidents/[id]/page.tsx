@@ -247,8 +247,8 @@ export default function Page() {
       </div>
 
       {/* Next Steps - full width */}
-      <div className="border border-mist/10 bg-graphite/30">
-        <div className="px-4 py-3 border-b border-mist/10">
+      <div className="border border-mist/10 border-t-0 bg-graphite/30 shadow-[inset_0_10px_20px_-18px_rgba(0,0,0,0.65)]">
+        <div className="px-4 py-3">
           <h3 className="text-sm font-medium text-white">Suggested Next Steps</h3>
         </div>
         <div className="divide-y divide-mist/5">
