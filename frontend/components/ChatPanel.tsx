@@ -9,7 +9,6 @@ type Citation = {
   title?: string;
   score?: number;
   source_document?: string;
-  source_uri?: string;
   chunk_index?: number;
 };
 type Message = {
@@ -30,9 +29,6 @@ function citationHref(citation: Citation): string | null {
   if (citation.type === "alert" && citation.id) {
     return `/alerts?alert_id=${citation.id}`;
   }
-  if (citation.type === "runbook" && citation.source_uri) {
-    return citation.source_uri;
-  }
   if (citation.type === "runbook" && citation.source_document) {
     const doc = encodeURIComponent(citation.source_document);
     const anchor = citation.chunk_index != null ? `#chunk-${citation.chunk_index}` : "";
@@ -50,7 +46,7 @@ function citationLabel(citation: Citation, index: number): string {
   }
   if (citation.type === "runbook") {
     const chunk = citation.chunk_index != null ? ` (chunk ${citation.chunk_index})` : "";
-    return `[${index + 1}] ${citation.title ?? citation.source_document ?? "Runbook"}${chunk}`;
+    return `[${index + 1}] ${citation.source_document ?? "Runbook"}${chunk}`;
   }
   return `[${index + 1}] Source`;
 }
