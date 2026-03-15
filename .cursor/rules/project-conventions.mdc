@@ -1,0 +1,16 @@
+---
+description: OpsRelay project conventions and workflow
+alwaysApply: false
+---
+# Project Conventions
+
+- Prefer stacked branches for phased work.
+- Do not commit unless the user explicitly asks; never amend unless requested.
+- Save implementation plans in `docs/` before starting major changes, linked to Linear issue numbers/projects/milestones.
+- Favor defensive defaults and graceful degradation for ML services.
+- Keep ingestion/webhooks fast; do heavy work async via Celery.
+
+## Testing Expectations
+- Backend: `pytest` (use docker-compose test stack when integration tests are needed).
+- Frontend: `npm run lint` for UI changes.
+- Verify key endpoints when relevant: `/health`, `/incidents`, `/alerts`, `/chat`.

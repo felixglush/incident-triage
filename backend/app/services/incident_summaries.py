@@ -66,7 +66,10 @@ def generate_summary(
     ]
 
     if highlights:
-        summary_lines.append("Key alerts: " + "; ".join(highlights))
+        summary_lines.append("")
+        summary_lines.append("Key alerts:")
+        for highlight in highlights:
+            summary_lines.append(f"- {highlight}")
         for alert in alerts[: min(len(alerts), 3)]:
             citations.append({
                 "type": "alert",
@@ -75,6 +78,7 @@ def generate_summary(
             })
 
     if similar_incidents:
+        summary_lines.append("")
         summary_lines.append("Similar incidents:")
         for item in similar_incidents:
             match = item["incident"]
@@ -88,6 +92,7 @@ def generate_summary(
             })
 
     if runbook_chunks:
+        summary_lines.append("")
         summary_lines.append("Relevant runbook references:")
         for item in runbook_chunks:
             chunk = item["chunk"]
@@ -124,7 +129,8 @@ def summarize_incident(
     )
 
     # Ensure embeddings exist
-    ensure_incident_embedding(db, incident, alerts)
+    # Exclude prior generated summary text from retrieval query context.
+    ensure_incident_embedding(db, incident, alerts, include_summary=False)
     ensure_runbook_embeddings(db)
     db.flush()
 
@@ -133,9 +139,10 @@ def summarize_incident(
         incident,
         alerts,
         limit=limit_similar,
+        include_summary=False,
     )
 
-    query_text = build_incident_text(incident, alerts)
+    query_text = build_incident_text(incident, alerts, include_summary=False)
     runbook_chunks = find_similar_runbook_chunks(
         db,
         incident.incident_embedding,

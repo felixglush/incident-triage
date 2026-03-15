@@ -19,9 +19,13 @@ from app.models.database import HAS_PGVECTOR
 from app.services.embeddings import embed_text, jaccard_similarity, _tokens
 
 
-def build_incident_text(incident: Incident, alerts: List[Alert]) -> str:
+def build_incident_text(
+    incident: Incident,
+    alerts: List[Alert],
+    include_summary: bool = True,
+) -> str:
     parts = [incident.title or ""]
-    if incident.summary:
+    if include_summary and incident.summary:
         parts.append(incident.summary)
     if incident.affected_services:
         parts.append("services: " + ", ".join(incident.affected_services))
@@ -35,8 +39,13 @@ def build_incident_text(incident: Incident, alerts: List[Alert]) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def ensure_incident_embedding(db: Session, incident: Incident, alerts: List[Alert]) -> List[float]:
-    text = build_incident_text(incident, alerts)
+def ensure_incident_embedding(
+    db: Session,
+    incident: Incident,
+    alerts: List[Alert],
+    include_summary: bool = True,
+) -> List[float]:
+    text = build_incident_text(incident, alerts, include_summary=include_summary)
     embedding = embed_text(text)
     incident.incident_embedding = embedding
     db.add(incident)
@@ -115,13 +124,19 @@ def find_similar_incidents(
     limit: int = 5,
     min_score: float = MIN_SCORE,
     min_keyword_overlap: float = MIN_KEYWORD_OVERLAP,
+    include_summary: bool = True,
 ) -> List[Dict[str, Any]]:
     query_embedding = incident.incident_embedding
     if query_embedding is None:
-        query_embedding = ensure_incident_embedding(db, incident, alerts)
+        query_embedding = ensure_incident_embedding(
+            db,
+            incident,
+            alerts,
+            include_summary=include_summary,
+        )
 
     results: List[Dict[str, Any]] = []
-    query_tokens = _tokens(build_incident_text(incident, alerts))
+    query_tokens = _tokens(build_incident_text(incident, alerts, include_summary=include_summary))
     query_services = set(incident.affected_services or [])
     if not query_tokens and not query_services:
         return results

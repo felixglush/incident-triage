@@ -59,7 +59,7 @@ export default function Sidebar() {
       </nav>
 
       {/* Footer status */}
-      <div className="p-4 border-t border-mist/10">
+      <div className="p-4 pt-5">
         <div className="p-4 bg-slate/30 text-xs text-mist/70">
           <div className="flex items-center gap-2">
             <span className="relative flex h-2 w-2">
