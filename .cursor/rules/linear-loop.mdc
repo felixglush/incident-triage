@@ -1,0 +1,34 @@
+---
+description: Agentic loop for working through Linear issues in a phase
+alwaysApply: false
+---
+# Linear Agentic Loop
+
+## Evaluate
+- Use Linear MCP `list_issues` filtered to the requested phase/milestone.
+- Keep issues in Todo or In Progress; prioritize using this order:
+  1) User-specified focus (phase/milestone, explicit issue IDs, or “do X next”).
+  2) Dependencies: unblockers first, then work that has no blockers.
+  3) Status: In Progress before Todo; avoid “Under Review” unless asked.
+  4) Priority field: Urgent > High > Medium > Low.
+  5) Smallest viable work that completes a slice and passes quality gates based on roadmap.
+- Present a numbered list and identify the next actionable issue.
+
+## Execute
+- Move the chosen issue to In Progress with `update_issue`.
+- Read the issue description, comments, and any linked docs before coding.
+- Stop and review plan with me. Make an assessment of what might be incomplete information, illogical, dependency breaking. If an implementation is missing a dependency, highlight this.
+- Implement changes following repo conventions (branch prefix `codex/`).
+- Run quality gates: backend `pytest`, frontend `npm run lint`, plus relevant integration tests.
+- If gates pass: summarize for me. Ask me if you should move issue to Done and add a summary comment to the issue.
+- If gates fail: fix, re-run, and only then mark Done.
+
+## Checkpoint
+- Summarize files changed and tests run.
+- Show remaining issues in the phase.
+- Ask whether to continue to the next issue or stop.
+
+## Guardrails
+- Never commit or push without explicit user approval.
+- Never modify issues outside the requested phase.
+- If an issue is too large, ambiguous, or doesn't have concrete guidance, mark Blocked with a comment and move on.
