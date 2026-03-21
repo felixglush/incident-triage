@@ -387,6 +387,359 @@ kubectl get events -n ecommerce --sort-by='.lastTimestamp' | grep fraud-service
 
 ---
 
+### INC-2024-0201 — Partial Checkout Failures from Payment Gateway Rate Limiting
+
+**Severity:** P1
+**Date:** 2024-07-20
+**Duration:** 18 minutes (14:32 UTC – 14:50 UTC)
+**On-Call:** Chen Wei, Payments Platform
+
+#### Description
+
+At 14:32 UTC, the payment processor (Stripe) encountered rate limits during a legitimately high-traffic day (peak load 8,500 requests/minute, normal baseline 3,200). Stripe's API began returning `429 Too Many Requests` responses. Checkout-service's retry logic was configured to retry aggressively without backoff, causing exponential request amplification. Checkout error rate climbed to 8%, and customers received "payment processing unavailable" errors.
+
+Alerts triggered:
+- `payment_gateway_5xx_rate > 5%` (actually 429 rate-limiting, not 5xx)
+- `checkout_service.payment_provider_error_rate > 5%`
+- `checkout_service.retry_loop_depth > 3` (aggressive retry amplification)
+
+#### Impact
+
+- **Checkout failure rate:** 8% for 18 minutes
+- **Failed checkout attempts:** ~3,400 transactions
+- **GMV lost:** ~$67,000 (based on ARPU $197)
+- **Customers affected:** 2,100+
+- **Payment provider escalation:** No; legitimate rate limiting
+
+#### Root Cause
+
+Payment processor applied standard rate-limiting during peak traffic. Checkout-service had retry policy configured with `max_retries=10`, `initial_backoff_ms=100`, and exponential backoff factor of `1.5x` (no jitter). This caused the retry storm to compound, sending 15-20x amplified load back to the payment processor. When legitimate traffic spike combined with retry traffic, checkout-service became a dos vector against the payment gateway.
+
+#### Resolution Steps
+
+**Step 1: Reduce checkout-service retry aggressiveness (feature flag)**
+```bash
+curl -X POST http://checkout-service.ecommerce:8000/admin/feature-flags \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -d '{
+    "flag": "payment_processor.retry_policy",
+    "max_retries": 3,
+    "initial_backoff_ms": 500,
+    "max_backoff_ms": 5000,
+    "backoff_factor": 2.0,
+    "jitter_enabled": true
+  }' \
+  -H "Content-Type: application/json"
+# Retry policy updated; checkout-service now uses 3 retries with exponential backoff + jitter
+```
+
+**Step 2: Monitor checkout error recovery**
+```bash
+watch -n 5 'curl -s http://prometheus.ecommerce:9090/api/v1/query --data-urlencode "query=rate(checkout_service_errors_total[1m])" | jq ".data.result[0].value[1]"'
+# Error rate should drop from 8% to <0.5% within 2 minutes
+```
+
+**Step 3: Scale checkout-service to distribute load**
+```bash
+kubectl scale deployment/checkout-service --replicas=14 -n ecommerce
+# 14 replicas now; reduces per-instance request rate to payment processor
+```
+
+**Step 4: Implement circuit breaker for payment processor (permanent fix)**
+While system recovers, permanently add circuit breaker:
+```bash
+kubectl set env deployment/checkout-service \
+  -n ecommerce \
+  PAYMENT_PROCESSOR_CIRCUIT_BREAKER_THRESHOLD=50 \
+  PAYMENT_PROCESSOR_CIRCUIT_BREAKER_TIMEOUT_S=60
+# Deployment updated; circuit breaker now trips after 50 consecutive failures
+```
+
+#### Follow-Up Actions
+
+1. **Retry policy hardened:** Max retries reduced from 10 → 3, backoff jitter added to prevent thundering herd
+2. **Payment processor circuit breaker:** Implemented to reject new payment attempts if 10+ consecutive failures occur
+3. **Rate-limit aware monitoring:** Added alert `payment_gateway_429_rate > 100/min` to detect early
+4. **Load test pre-event planning:** Coordinate with Stripe on expected peak load before major sales events
+5. **Postmortem:** 2024-07-24, review retry strategy and payment processor communication
+
+---
+
+### INC-2024-0456 — Fraud Service Configuration Typo Blocking Legitimate Orders
+
+**Severity:** P2
+**Date:** 2024-10-12
+**Duration:** 23 minutes (11:15 UTC – 11:38 UTC)
+**On-Call:** Marcus Wong, Payments Platform
+
+#### Description
+
+A configuration deployment changed the fraud risk scoring threshold for order blocking from `0.85` (block high-risk orders >85% risk) to `0.085` (block >8.5% risk). This single-digit typo meant virtually all orders were flagged as fraudulent and blocked at checkout. Customers received "order blocked for fraud review" messages. Approximately 400 customers complained via support within 10 minutes. The incident was detected via support ticket spike, not automated alerts.
+
+Impact was silent to monitoring (no error rate spike; orders were blocked gracefully, not errored).
+
+#### Impact
+
+- **Checkout block rate:** 97% of orders flagged and blocked
+- **Failed checkouts:** ~400 customers over 23 minutes
+- **GMV blocked:** ~$85,000 (estimated from typical order patterns)
+- **Support tickets:** 47 complaints received
+- **Detection method:** Manual (no automated threshold alert)
+- **Time to identify cause:** 12 minutes (manual investigation of config history)
+
+#### Root Cause
+
+Configuration file `backend/config/fraud_rules.yml` was updated via automated deployment. A typo in the YAML config set:
+```yaml
+fraud_scoring:
+  block_threshold: 0.085  # WRONG: intended 0.85, extra zero added
+```
+
+The fraud-service loaded this config at startup and applied it to all order scoring. Legitimate orders with fraud scores 0.15–0.80 were now blocked. The config change was not caught during code review (human readable as "8.5%" risk threshold, which sounds plausible to a human).
+
+#### Resolution Steps
+
+**Step 1: Identify the problematic config**
+```bash
+git log --oneline backend/config/fraud_rules.yml | head -5
+# Commit: a7f3e2c Update fraud thresholds for Q4 campaign
+git diff a7f3e2c~1 a7f3e2c backend/config/fraud_rules.yml
+# Shows: block_threshold: 0.85 → 0.085 (typo detected)
+```
+
+**Step 2: Immediate rollback of config**
+```bash
+git checkout HEAD~1 -- backend/config/fraud_rules.yml
+git commit -m "rollback: fraud config typo (INC-2024-0456)"
+git push origin main
+# Config file reverted to 0.85 threshold
+```
+
+**Step 3: Redeploy fraud-service with corrected config**
+```bash
+kubectl rollout restart deployment/fraud-service -n ecommerce
+# 4 pods restarting; config reload ETA 30 seconds
+```
+
+**Step 4: Monitor fraud block rate recovery**
+```bash
+watch -n 5 'psql $DATABASE_URL -c "SELECT DATE_TRUNC(\u0027minute\u0027, created_at) as minute, COUNT(*) as blocked_count FROM orders WHERE fraud_check_blocked = true AND created_at > NOW() - INTERVAL \u00271 hour\u0027 GROUP BY DATE_TRUNC(\u0027minute\u0027, created_at) ORDER BY minute DESC LIMIT 10;"'
+# Block rate should drop from 97% to <2% baseline within 1 minute
+```
+
+**Step 5: Unbind fraudulently blocked orders (allow customer checkout retry)**
+```bash
+psql $DATABASE_URL << 'SQL'
+UPDATE orders
+SET fraud_check_blocked = false, fraud_block_reason = 'Configuration error (INC-2024-0456); order re-enabled'
+WHERE fraud_check_blocked = true
+  AND created_at > NOW() - INTERVAL '30 minutes'
+  AND fraud_score < 0.9;  -- Only unblock plausible orders
+RETURNING id, user_id, fraud_score;
+SQL
+# ~385 orders unblocked
+```
+
+**Step 6: Send customer outreach (CS team)**
+```
+Email template to blocked customers:
+"We've fixed a configuration issue that temporarily prevented your order. Your cart is ready to checkout again. Use code SORRY10 for 10% off to apologize for the inconvenience."
+```
+
+#### Follow-Up Actions
+
+1. **Config validation test:** Add pre-commit hook to validate fraud threshold is between 0.5 and 0.99 (catch typos)
+2. **Code review checklist:** Highlight numerical thresholds in config diffs (human review should catch 8.5% label)
+3. **Fraud block rate monitoring:** Add dashboard tracking `orders_blocked_by_fraud_percent` to detect sudden spikes
+4. **Postmortem:** 2024-10-14, implement preventive validation for numerical configs
+
+---
+
+### INC-2025-0118 — Stripe API OAuth Token Expiry During Auto-Renew
+
+**Severity:** P1
+**Date:** 2025-01-22
+**Duration:** 31 minutes (09:14 UTC – 09:45 UTC)
+**On-Call:** Aisha Patel, Payments Platform
+
+#### Description
+
+Checkout-service maintains a long-lived OAuth token for Stripe API access. Token expiry is set to 12 hours. At 09:14 UTC, the token expired. Checkout-service detected expiry and attempted to call the token renewal endpoint. However, the renewal endpoint was temporarily unreachable due to a DNS TTL cache miss (internal DNS SRV record had 300-second TTL; the DNS resolver cached the old record pointing to a decommissioned server). All Stripe API calls failed immediately with `"invalid_token"` errors. Checkout success rate dropped to 0% for 19 minutes until DNS TTL expired and the resolver re-queried.
+
+Alerts triggered:
+- `checkout_service.stripe_api_auth_failure_rate > 90%`
+- `checkout_service.p99_latency_ms > 5000` (timeouts on token renewal endpoint)
+
+#### Impact
+
+- **Checkout success rate:** 0% for 19 minutes (complete outage during token renewal window)
+- **Failed checkouts:** ~4,200 transactions
+- **GMV lost:** ~$823,000 (assuming ARPU $196)
+- **Customers affected:** 2,100+
+- **Incident duration:** 31 minutes total; 19 minutes with zero success
+
+#### Root Cause
+
+Checkout-service token renewal logic did not gracefully handle network failures:
+1. Token expired at 09:14 UTC
+2. Attempted renewal via `POST /stripe/oauth/token` endpoint
+3. DNS resolver returned stale cached record (300s TTL)
+4. Renewal request timed out (TCP timeout 30s)
+5. Checkout-service did not implement retry-with-backoff or fallback mechanism
+6. Every checkout request attempted token renewal, then failed when renewal hung
+7. At 09:44 UTC, DNS TTL expired; resolver re-queried and received correct record
+8. Subsequent renewals succeeded; checkout recovered
+
+#### Resolution Steps
+
+**Step 1: Force immediate token renewal (bypass cached DNS)**
+```bash
+# Manually request token renewal using alternative DNS resolver (e.g., 8.8.8.8)
+curl -X POST https://oauth.stripe.com/oauth/token \
+  --resolve oauth.stripe.com:443:52.89.123.45 \  # Use hardcoded IP instead of DNS
+  -d "client_id=${STRIPE_CLIENT_ID}" \
+  -d "client_secret=${STRIPE_CLIENT_SECRET}" \
+  -d "grant_type=client_credentials" | jq '.access_token'
+# Response: "sk_live_51234567890..." (new token)
+
+# Store new token in Kubernetes secret
+kubectl set env deployment/checkout-service \
+  -n ecommerce \
+  STRIPE_OAUTH_TOKEN="sk_live_51234567890..."
+# Secret updated; deployment rolling
+```
+
+**Step 2: Monitor checkout recovery**
+```bash
+watch -n 5 'curl -s http://prometheus.ecommerce:9090/api/v1/query --data-urlencode "query=rate(checkout_service_errors_total[1m])" | jq ".data.result[0].value[1]"'
+# Error rate should drop from 100% to <0.5% within 2 minutes
+```
+
+**Step 3: Implement token renewal retry logic (permanent fix)**
+Deploy code change to checkout-service:
+```bash
+git diff HEAD~1 backend/app/services/stripe_client.py
+# Shows: Added ExponentialBackoff(max_retries=5, backoff_factor=2) to token_renewal_request
+git commit -m "fix: add retry logic to Stripe token renewal (INC-2025-0118)"
+git push origin main
+
+# Redeploy checkout-service
+kubectl rollout restart deployment/checkout-service -n ecommerce
+# 8 pods restarting with improved token renewal resilience
+```
+
+**Step 4: Hardcode Stripe API IPs as fallback (optional)**
+```bash
+# In checkout-service configuration, add fallback IPs for api.stripe.com and oauth.stripe.com
+kubectl set env deployment/checkout-service \
+  -n ecommerce \
+  STRIPE_API_FALLBACK_IPS="52.89.214.12,52.89.214.13" \
+  STRIPE_OAUTH_FALLBACK_IPS="52.89.123.45,52.89.123.46"
+# If DNS fails, service will retry using hardcoded IPs
+```
+
+#### Follow-Up Actions
+
+1. **Token renewal timeout hardened:** Implement 10-second timeout with 3 retries + exponential backoff
+2. **Stripe IP fallback:** Maintain list of Stripe API server IPs for fallback DNS resolution
+3. **Token expiry warning:** Log warning at 30% of token lifetime, 10% of lifetime (proactive renewal before hard expiry)
+4. **DNS health monitoring:** Add monitoring for internal DNS resolution latency and error rate
+5. **Postmortem:** 2025-01-24, review OAuth token management and dependency resilience patterns
+
+---
+
+### INC-2024-0329 — Order Service Database Deadlock Under Concurrent Checkout
+
+**Severity:** P0
+**Date:** 2024-11-14
+**Duration:** 12 minutes (19:32 UTC – 19:44 UTC)
+**On-Call:** Jamie Chen, Payments Platform
+
+#### Description
+
+Black Friday peak traffic hit order-service at 19:32 UTC with concurrent checkout burst (9,200 simultaneous orders/minute, peak baseline 2,100). Order-service's SQL transaction logic locked the `orders` table, then attempted to lock `order_items`. Meanwhile, concurrent transactions attempted the reverse lock order, creating a circular wait (deadlock cycle). PostgreSQL detected the deadlock and killed one of the transactions. Checkout-service received `409 Conflict` responses. P99 checkout latency spiked to 18 seconds (baseline 1.2s). Auto-retry logic caught ~97% of failed orders and succeeded on second attempt, but 3% of orders were lost (user never received "order confirmed").
+
+Alerts triggered:
+- `postgres_deadlocks_per_minute > 5` (baseline 0)
+- `checkout_service.p99_latency_ms > 10000`
+- `order_service.conflict_error_rate > 2%`
+
+#### Impact
+
+- **Checkout conflict rate:** 3% of 9,200 orders = ~276 orders affected
+- **Orders rolled back/re-attempted:** ~95% succeeded on retry; ~5% gave up (user abandoned)
+- **GMV directly lost:** ~$54,000 (276 orders × $196 ARPU)
+- **Customer experience:** ~140 customers saw "order failed" message (some retried successfully)
+- **P99 latency during incident:** 18 seconds (5x baseline)
+
+#### Root Cause
+
+Order-service transaction logic acquired locks in inconsistent order:
+- **Transaction A:** Lock `orders` table (for new order insert) → then lock `order_items` table (for line items)
+- **Transaction B:** Lock `order_items` table first (for inventory check) → then lock `orders` table (for order metadata update)
+
+Under high concurrency:
+1. Transaction A locks `orders`, waits for `order_items`
+2. Transaction B locks `order_items`, waits for `orders`
+3. Circular wait detected by PostgreSQL deadlock detector (~500ms)
+4. PostgreSQL kills one transaction (random selection)
+5. Killed transaction rolls back; client sees 409 Conflict error
+6. Checkout-service retries; new transaction succeeds
+
+#### Resolution Steps
+
+**Step 1: Identify deadlocked queries**
+```bash
+kubectl logs deployment/order-service -n ecommerce --tail=500 | grep -i "deadlock\|conflict"
+# Output: "deadlock detected" messages appear 5-10 times in last 500 logs
+```
+
+**Step 2: Reorder SQL lock acquisition (code fix)**
+```bash
+git diff HEAD~1 backend/app/services/order_service.py
+# Shows:
+# OLD: INSERT orders table, then INSERT order_items
+# NEW: INSERT order_items FIRST (inventory-dependent), then INSERT orders
+
+git commit -m "fix: reorder database locks to prevent deadlock (INC-2024-0329)"
+git push origin main
+
+# Redeploy order-service
+kubectl rollout restart deployment/order-service -n ecommerce
+# 6 pods restarting with consistent lock order
+```
+
+**Step 3: Monitor deadlock resolution**
+```bash
+watch -n 2 'kubectl logs deployment/order-service -n ecommerce --tail=100 | grep -c "deadlock"'
+# Deadlock count should drop to 0 within 1 minute of redeploy
+```
+
+**Step 4: Monitor checkout latency recovery**
+```bash
+watch -n 5 'curl -s http://prometheus.ecommerce:9090/api/v1/query --data-urlencode "query=histogram_quantile(0.99, checkout_latency_ms)" | jq ".data.result[0].value[1]"'
+# P99 latency should recover from 18s to <2s within 3 minutes
+```
+
+**Step 5: Increase checkout-service retry tolerance (temporary)**
+```bash
+kubectl set env deployment/checkout-service \
+  -n ecommerce \
+  ORDER_SERVICE_MAX_RETRIES=5 \
+  ORDER_SERVICE_RETRY_BACKOFF_MS=200
+# Allows checkout-service to retry order creation up to 5 times; helps catch deadlock victims
+```
+
+#### Follow-Up Actions
+
+1. **Lock ordering audit:** Review all multi-table transactions in order-service for consistent lock acquisition order
+2. **Deadlock prevention test:** Add integration test that simulates concurrent order creation; verify zero deadlocks under 10k RPS
+3. **Database index review:** Optimize `order_items` index on `order_id` to reduce lock contention
+4. **Explicit transaction isolation level:** Set `SERIALIZABLE` isolation for inventory check transaction (prevents phantom reads, caught earlier)
+5. **Postmortem:** 2024-11-16, implement deadlock prevention strategy; consider order-service DB sharding by customer
+
+---
+
 ## Failure Mode Catalog
 
 ### Failure Mode: Idempotency Key Collision
@@ -1147,6 +1500,54 @@ Incident link: [PagerDuty]
 1. Page on-call; optional Slack Huddle (can investigate in parallel)
 2. Status updates every 10 minutes in Slack thread
 3. IC ensures clear action plan and progress tracking
+
+---
+
+## Inter-Service Impact Map
+
+When Checkout & Payments degrades, the cascade looks like:
+
+| Stage | Service | Impact | Time to Detect |
+|---|---|---|---|
+| Immediate | checkout-service | checkout errors spike, P99 latency >3s | <1 min |
+| +2 min | order-service | order creation backed up, pending orders accumulate | +2 min |
+| +5 min | notification-service | order confirmation emails queued, delivery delay | +5 min |
+| +10 min | webhook-service | merchant notifications delayed, order status updates stuck | +10 min |
+| +15 min | analytics-service | order data pipeline backed up, reporting lag | +15 min |
+
+**How to read this:** If checkout-service is down for N minutes, expect these downstream services to start failing or degrading at the indicated intervals.
+
+**Isolation actions:** Enable circuit breaker on checkout-service (return "temporarily unavailable" instead of 500 errors). Trigger fallback: guest checkout without fraud checks for orders <$500. Scale order-service DB connections if backup occurs.
+
+---
+
+## Rollback Decision Tree
+
+**When to rollback vs. hotfix:**
+
+1. Error rate >5% for >3 minutes?
+   - YES → If error is from a checkout-service deploy within last 1 hour, rollback immediately
+   - NO → Proceed to step 2
+
+2. Impact quantified (>$50k GMV loss or >1,000 failed checkouts)?
+   - YES → Rollback if it's an application code issue. Hotfix if it's config/fraud rules.
+   - NO → Wait 5 minutes for pattern to stabilize; don't panic-rollback
+
+3. Root cause identified with high confidence?
+   - HIGH (e.g., null pointer, obvious deploy issue) → Rollback if recent deploy
+   - LOW (intermittent, unclear) → Wait and gather more data
+
+**Quick rollback command:**
+```bash
+kubectl rollout undo deployment/checkout-service -n ecommerce
+kubectl rollout status deployment/checkout-service -n ecommerce --timeout=3m
+```
+
+**Verification after rollback:**
+- Error rate drops to <0.1% within 2 minutes
+- P99 checkout latency recovers to <3s
+- Fraud check latency returns to baseline (<200ms)
+- No spike in manual refunds or customer complaints
 
 ---
 
