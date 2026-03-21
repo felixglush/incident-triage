@@ -15,7 +15,7 @@ STRUCTURED_DOC = """# Queue Workers Runbook
 
 Queue workers process background jobs.
 
-### INC-2024-0099 — Worker Memory Leak
+### INC-2024-0099 — Xyzzy Worker Memory Leak
 
 **Severity:** P1
 
@@ -56,7 +56,7 @@ def test_upsert_writes_section_header_and_content(db_session):
     assert chunks
 
     # All chunks for the incident section carry section_header
-    incident_chunks = [c for c in chunks if c.section_header == "INC-2024-0099 — Worker Memory Leak"]
+    incident_chunks = [c for c in chunks if c.section_header == "INC-2024-0099 — Xyzzy Worker Memory Leak"]
     assert incident_chunks, "Expected chunks for the INC-2024-0099 section"
 
     # section_content on incident chunks contains the full section
@@ -77,16 +77,17 @@ def test_upsert_section_header_in_search_tsv(db_session):
     )
     db_session.flush()
 
-    # search_tsv is not null on chunks that have a section_header
-    chunks_with_tsv = (
+    # Check that a word ONLY in the section_header (not in any body text) is searchable
+    # "Xyzzy" appears exclusively in the section header, so a match proves section_header
+    # text is included when building search_tsv.
+    matching = (
         db_session.query(RunbookChunk)
         .filter(
-            RunbookChunk.source_document == "queue-workers-runbook.md",
-            RunbookChunk.search_tsv.isnot(None),
+            RunbookChunk.search_tsv.op("@@")(func.to_tsquery("english", "xyzzy"))
         )
         .all()
     )
-    assert chunks_with_tsv
+    assert len(matching) > 0, "Expected section_header tokens to be searchable in search_tsv"
 
 
 @pytest.mark.unit
@@ -124,6 +125,12 @@ def test_upsert_unchanged_document_skips(db_session):
     )
     db_session.flush()
 
+    chunk_count_before = (
+        db_session.query(RunbookChunk)
+        .filter_by(source_document="queue-workers-runbook.md", source="runbooks")
+        .count()
+    )
+
     count2 = upsert_markdown_document(
         db_session,
         source_document="queue-workers-runbook.md",
@@ -131,7 +138,17 @@ def test_upsert_unchanged_document_skips(db_session):
         source_uri=None,
         content=STRUCTURED_DOC,
     )
+    db_session.flush()
     assert count2 == 0
+
+    chunk_count_after = (
+        db_session.query(RunbookChunk)
+        .filter_by(source_document="queue-workers-runbook.md", source="runbooks")
+        .count()
+    )
+    assert chunk_count_after == chunk_count_before, (
+        f"Chunk count changed after no-op upsert: {chunk_count_before} -> {chunk_count_after}"
+    )
 
 
 @pytest.mark.unit
@@ -146,7 +163,24 @@ def test_upsert_changed_document_replaces_chunks(db_session):
     )
     db_session.flush()
 
-    modified = STRUCTURED_DOC + "\n\n### INC-2024-0100 — New Incident\n\nNew content here.\n"
+    # Replace the original section with a completely different one so the old
+    # section_header ("INC-2024-0099 — Xyzzy Worker Memory Leak") is absent from
+    # the new document and must not survive re-ingestion.
+    modified = """# Queue Workers Runbook
+
+## Service Overview
+
+Queue workers process background jobs.
+
+### INC-2024-0100 — New Incident
+
+**Severity:** P2
+
+New content here describing the new incident.
+
+**Resolution:**
+Apply the fix and monitor.
+"""
     count2 = upsert_markdown_document(
         db_session,
         source_document="queue-workers-runbook.md",
@@ -166,3 +200,18 @@ def test_upsert_changed_document_replaces_chunks(db_session):
         .all()
     )
     assert new_chunks
+
+    # Verify no chunks from the OLD document version remain — the old section
+    # header only existed in the first version and must be gone after re-ingestion.
+    old_chunks = (
+        db_session.query(RunbookChunk)
+        .filter(
+            RunbookChunk.source_document == "queue-workers-runbook.md",
+            RunbookChunk.section_header == "INC-2024-0099 — Xyzzy Worker Memory Leak",
+        )
+        .all()
+    )
+    assert not old_chunks, (
+        f"Expected old chunks to be replaced, but {len(old_chunks)} chunk(s) with "
+        "the old section header still exist"
+    )
