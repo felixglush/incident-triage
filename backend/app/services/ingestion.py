@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import logging
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -33,14 +34,14 @@ def extract_title(lines: list[str]) -> Optional[str]:
     return None
 
 
-def _extract_sections(text: str, title: Optional[str]) -> List[tuple]:
+def _extract_sections(text: str, title: Optional[str]) -> List[Tuple[Optional[str], str]]:
     """
     Split markdown text into (section_header, section_content) pairs on ## / ### boundaries.
     Content before the first ## or ### header becomes a preamble attributed to the document title.
     Returns list of (header: str | None, content: str) tuples, skipping empty sections.
     """
     lines = text.splitlines()
-    sections: List[tuple] = []
+    sections: List[Tuple[Optional[str], str]] = []
     current_header: Optional[str] = title
     current_lines: List[str] = []
 
@@ -131,6 +132,9 @@ def chunk_markdown_structured(
     Flat-doc fallback: if no ## or ### headers exist, the entire document is
     treated as one section (section_content = full document).
     """
+    if not text or not text.strip():
+        return []
+
     lines = text.splitlines()
     title = extract_title(lines)
 
@@ -159,7 +163,6 @@ def chunk_markdown_structured(
             )
 
         if len(section_content) > 6000:
-            import logging
             logging.getLogger(__name__).warning(
                 "Large section_content (%d chars) for section_header=%r — "
                 "consider splitting this section",
