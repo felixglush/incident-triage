@@ -452,6 +452,445 @@ The incident was detected by:
 
 ---
 
+### INC-2024-0267 — Search Latency Degradation from Elasticsearch GC Pauses
+
+**Severity:** P1
+**Date:** 2024-08-10
+**Duration:** 22 minutes
+**Status:** Resolved + JVM Tuning Applied
+
+#### Description
+
+An Elasticsearch cluster (3 nodes, 4GB heap each) with 180M documents entered a period of heavy indexing as the reindex-worker scaled to 8 replicas to process a large bulk product update. GC pauses spiked dramatically on the data nodes.
+
+Elasticsearch's default G1GC collector paused the entire cluster for 8-second intervals during full GC sweeps. During these pauses:
+- All search requests queued on the blocked data nodes timed out after 30 seconds
+- Search P99 latency increased from baseline 180ms to 2.5 seconds
+- 12% of all search requests failed with timeout errors
+- Customers experienced "search unavailable" errors intermittently
+
+The incident was detected via:
+1. Search timeout alert (>5% failure rate)
+2. Elasticsearch node.process.cpu alert (GC consuming 60% CPU)
+3. Manual customer reports ("search broken")
+
+#### Impact
+
+- **Failed searches:** ~14,400 requests timed out over 22 minutes (1.2% of 10-min traffic)
+- **Search P99 latency:** 180ms → 2.5s (13.9x degradation)
+- **Revenue impact:** Estimated 8–12 lost orders from customers unable to search
+- **User experience:** ~1,200 customers experienced search failures
+
+#### Root Cause
+
+1. **Insufficient heap for indexing workload:** 4GB heap was marginal for 180M-document cluster under concurrent indexing and query load
+2. **G1GC tuning not optimized:** Default G1GC max pause target of 200ms was insufficient; actual pauses reached 8 seconds
+3. **No heap headroom for burst traffic:** Indexing burst filled 85% of heap, triggering full GC before young generation overflowed
+
+#### Resolution Steps
+
+**Immediate (minute 0–5):**
+1. Detected alert: "elasticsearch_search_timeout_ratio > 5%"
+   ```bash
+   curl -s "http://elasticsearch:9200/_nodes/stats/jvm?format=json" | jq '.nodes[] | {name, heap_used_percent, gc_collection_time_ms}'
+   # Output: heap_used_percent: 85%, gc_collection_time_ms increased by 15,000ms in last minute
+   ```
+
+2. **Checked GC logs** on data nodes:
+   ```bash
+   kubectl logs -f es-data-1 -n ecommerce --tail=100 | grep "Pause\|Full GC"
+   # Output: [2024-08-10T14:32:00Z] Full GC Pause: 8123ms
+   ```
+
+3. **Scaled reindex-worker back to 2 replicas** to reduce indexing pressure:
+   ```bash
+   kubectl scale deployment/catalog-reindex-worker --replicas=2 -n ecommerce
+   kubectl rollout status deployment/catalog-reindex-worker -n ecommerce
+   ```
+   Indexing throughput dropped, GC pauses reduced to 2–3 seconds.
+
+**Short-term (minute 5–22):**
+4. **Increased Elasticsearch heap to 6GB:**
+   ```bash
+   # Edit StatefulSet to increase JVM heap
+   kubectl edit statefulset elasticsearch-data -n ecommerce
+   # Change: -Xmx4g -Xms4g → -Xmx6g -Xms6g
+
+   # Rolling restart to apply changes
+   kubectl rollout restart statefulset/elasticsearch-data -n ecommerce
+   kubectl rollout status statefulset/elasticsearch-data -n ecommerce --timeout=10m
+   ```
+   Heap utilization dropped to 60%, GC pauses reduced to <500ms.
+
+5. **Enabled ZGC (low-latency GC)** for better pause times:
+   ```bash
+   # Edit StatefulSet JVM options
+   kubectl set env statefulset/elasticsearch-data \
+     ES_JAVA_OPTS="-Xmx6g -Xms6g -XX:+UseZGC -XX:ZCollectionInterval=120 -XX:ZUncommitDelay=300" \
+     -n ecommerce
+
+   # Verify ZGC is active
+   kubectl logs es-data-1 -n ecommerce | grep "ZGC\|GC"
+   ```
+
+6. **Verified search latency recovery:**
+   ```bash
+   # Monitor P99 latency
+   curl -G http://prometheus:9090/api/v1/query \
+     --data-urlencode 'query=histogram_quantile(0.99, elasticsearch_search_latency_seconds)' | jq '.data.result[0].value'
+   # Output: 175ms (baseline recovered)
+   ```
+
+**Post-incident (hour 1+):**
+7. **Increased reindex-worker replicas back to 8** once GC stabilized:
+   ```bash
+   kubectl scale deployment/catalog-reindex-worker --replicas=8 -n ecommerce
+   # Monitored GC pauses — remained <500ms even at higher throughput
+   ```
+
+#### Follow-up Actions
+
+**Completed:**
+1. **Heap sizing policy:** For clusters >100M documents, allocate minimum 6GB heap; increase 1GB per 50M documents
+2. **Enabled ZGC cluster-wide:** All Elasticsearch nodes now use ZGC instead of G1GC (max pause target: 10ms)
+3. **Added GC pause alert:** Alert if any node experiences pause >1 second for >30 seconds
+4. **Documented JVM tuning guide:** `docs/elasticsearch-jvm-tuning.md` with heap sizing and GC selection
+
+---
+
+### INC-2025-0087 — Inventory Cache TTL Too High Causing Oversell
+
+**Severity:** P1
+**Date:** 2025-02-27
+**Duration:** 8 hours 12 minutes (until manual fix)
+**Status:** Resolved + Integration Tests Added
+
+#### Description
+
+A previous incident (INC-2024-0331) had implemented an emergency fix: reduce inventory cache TTL to 5 seconds during flash sales. However, the configuration change was marked with a note: "REVERT TTL to 60s after sale ends."
+
+A subsequent deployment to catalog-api included a code change that forgot to revert the environment variable. The production configuration remained with `INVENTORY_CACHE_TTL_SECONDS=5` from the prior emergency, but was never reverted when the sale ended. For the next 8 hours, this caused:
+
+- Inventory reads returning stale data (5 seconds old) across regular operations
+- During moderate sales periods, 5-second stale inventory was acceptable
+- However, during a flash sale for a new product launch (2.3k units), the old TTL of 5 seconds was insufficient
+- 89 units were oversold (customer orders placed against stale cache showing inventory that had been sold)
+
+The incident was discovered when the fulfillment team reported 89 pending orders with no corresponding inventory.
+
+#### Impact
+
+- **Units oversold:** 89 units (~$8,500 value at average product price)
+- **Refunds issued:** 89 orders, partial fulfillment for 60 others
+- **Support tickets:** 12 escalations from customers with order cancellations
+- **Cache config confusion:** Post-mortem revealed 3 critical environment mismatches between staging and production
+
+#### Root Cause
+
+1. **Manual revert forgotten:** Deployment script lacked automation to check and revert TTL config after emergency period
+2. **No integration test for TTL rules:** Automated tests did not verify that TTL was properly set based on sale type (flash vs. regular)
+3. **Config drift between environments:** Staging had `INVENTORY_CACHE_TTL_SECONDS=60` (default) while production had `5` from previous incident
+
+#### Resolution Steps
+
+**Immediate (minute 0–10):**
+1. Detected via fulfillment alert: "Order inventory_variance > 50"
+   ```bash
+   psql -h $RDS_ENDPOINT -d ecommerce -c \
+     "SELECT COUNT(*) FROM orders WHERE product_id = 'NEW-LAUNCH-PRODUCT' AND status IN ('pending','processing');"
+   # Output: 89 orders but DB inventory shows 0
+   ```
+
+2. **Checked current cache TTL:**
+   ```bash
+   kubectl get deployment catalog-api -n ecommerce -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="INVENTORY_CACHE_TTL_SECONDS")].value}'
+   # Output: 5 (incorrect; should be 60)
+   ```
+
+3. **Immediately increased TTL back to 60 seconds:**
+   ```bash
+   kubectl set env deployment/catalog-api \
+     INVENTORY_CACHE_TTL_SECONDS=60 \
+     -n ecommerce
+
+   kubectl rollout status deployment/catalog-api -n ecommerce
+   ```
+
+4. **Purged stale inventory cache:**
+   ```bash
+   redis-cli -h $REDIS_HOST --scan --pattern "inventory:*" | xargs redis-cli DEL
+   ```
+
+**Short-term (minute 10–30):**
+5. **Refunded 89 oversold orders:**
+   ```bash
+   psql -h $RDS_ENDPOINT -d ecommerce -c \
+     "UPDATE orders SET status = 'refunded', refund_reason = 'cache-ttl-oversell-incident' \
+      WHERE product_id = 'NEW-LAUNCH-PRODUCT' AND created_at > '2025-02-27T09:00:00Z' \
+      AND id NOT IN (SELECT order_id FROM order_fulfillment WHERE status = 'shipped');"
+   ```
+
+6. **Verified no further oversells:**
+   ```bash
+   # Monitor for the next hour
+   watch "psql -h $RDS_ENDPOINT -d ecommerce -c \"SELECT COUNT(*) FROM orders WHERE status='pending' AND created_at > now() - interval '1 hour';\""
+   ```
+
+#### Follow-up Actions
+
+**Completed:**
+1. **Added integration test to verify TTL configuration:**
+   ```python
+   # tests/backend/integration/test_cache_ttl_config.py
+   def test_inventory_cache_ttl_matches_expected_value():
+       """Verify that INVENTORY_CACHE_TTL_SECONDS is 60 in production"""
+       ttl = int(os.getenv('INVENTORY_CACHE_TTL_SECONDS', '60'))
+       assert ttl == 60, f"Cache TTL must be 60s; got {ttl}s"
+   ```
+
+2. **Implemented automated TTL revert in deployment:**
+   - Added Helm post-deploy hook to check if `INVENTORY_CACHE_TTL_SECONDS` is <30 and reset to 60
+   - Sends alert to on-call if this revert is triggered (indicates emergency config leftover)
+
+3. **Added prod-vs-staging config validation:**
+   - Kubernetes ConfigMap now includes checksums; deployment fails if checksums mismatch
+   - Prevents manual config drift
+
+---
+
+### INC-2024-0444 — Elasticsearch Shard Allocation Timeout After Node Failure
+
+**Severity:** P1
+**Date:** 2024-12-08
+**Duration:** 47 minutes
+**Status:** Resolved + Timeout Tuning Applied
+
+#### Description
+
+A Kubernetes worker node (10.0.2.15, running es-data-2) suffered a kernel panic and became unavailable. Elasticsearch immediately detected the node loss and began auto-rebalancing shards to maintain replica distribution.
+
+However, the cluster's `cluster.info.update.interval` timeout was set to the Elasticsearch default of 30 seconds. The rebalancing operation attempted to read cluster metadata but hit this timeout. The cluster remained stuck in YELLOW state:
+- Primary shards allocated and available
+- Replica shards could not be reassigned (30-sec timeout exceeded)
+- Search and inventory reads fell back to reading from PostgreSQL (slow, non-indexed queries)
+- P99 latency spiked from 200ms to 3.5 seconds
+
+The incident persisted for 47 minutes until an on-call engineer manually triggered shard allocation.
+
+#### Impact
+
+- **Cluster health:** YELLOW (degraded) for 47 minutes
+- **Search/inventory latency:** 200ms → 3.5s (17.5x degradation)
+- **Failed searches:** ~0% (fell back to DB) but slow, timeout rate <1%
+- **Stale data served:** Inventory reads used PostgreSQL snapshots 2–5 seconds old
+- **Revenue:** Estimated 5–8 lost orders from slow product browsing
+
+#### Root Cause
+
+1. **Default timeout too aggressive:** 30-second `cluster.info.update.interval` was too short for large rebalancing operations
+2. **No manual recovery procedure:** Cluster required manual shard allocation trigger instead of auto-recovering
+3. **Insufficient monitoring:** No alert for cluster staying YELLOW for >10 minutes; issue went undetected until latency spike
+
+#### Resolution Steps
+
+**Immediate (minute 0–5):**
+1. Detected alert: "elasticsearch_cluster_health != green for >2 min"
+   ```bash
+   curl -s "http://elasticsearch:9200/_cluster/health" | jq '.status, .active_shards_percent_as_number'
+   # Output: "yellow", 75.2% (25% of shards unallocated)
+   ```
+
+2. **Checked node status:**
+   ```bash
+   curl -s "http://elasticsearch:9200/_cat/nodes?v" | grep -E "node|es-data"
+   # Output: es-data-1 and es-data-3 up; es-data-2 MISSING
+
+   kubectl get nodes | grep -i es-data
+   # Output: es-data-1 Ready, es-data-3 Ready, es-data-2 NotReady
+   ```
+
+3. **Manually triggered shard allocation:**
+   ```bash
+   curl -X POST "http://elasticsearch:9200/_cluster/reroute?retry_failed=true" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "commands": [
+         {
+           "allocate_replica": {
+             "index": "products_live",
+             "shard": 0,
+             "node": "es-data-3"
+           }
+         }
+       ]
+     }'
+   ```
+   Cluster began rebalancing; shards allocated within 2 minutes.
+
+**Short-term (minute 5–47):**
+4. **Monitored cluster recovery:**
+   ```bash
+   while true; do
+     curl -s "http://elasticsearch:9200/_cluster/health" | jq '.status, .active_shards_percent_as_number'
+     sleep 10
+   done
+   # Confirmed: green status achieved at minute 7
+   ```
+
+5. **Verified search latency recovery:**
+   ```bash
+   curl -G http://prometheus:9090/api/v1/query \
+     --data-urlencode 'query=histogram_quantile(0.99, elasticsearch_search_latency_seconds)' | jq '.data.result[0].value'
+   # Output: 210ms (near baseline)
+   ```
+
+6. **Investigated root cause** (post-incident):
+   ```bash
+   # Checked Elasticsearch cluster settings
+   curl -s "http://elasticsearch:9200/_cluster/settings" | jq '.persistent.cluster.info.update'
+   # Output: default (30000ms) — was not overridden
+   ```
+
+#### Follow-up Actions
+
+**Completed:**
+1. **Increased `cluster.info.update.interval` timeout:**
+   ```bash
+   curl -X PUT "http://elasticsearch:9200/_cluster/settings" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "persistent": {
+         "cluster.info.update.interval": "60s"
+       }
+     }'
+   ```
+
+2. **Added alert for cluster YELLOW/RED state:**
+   - Alert if cluster health != GREEN for >5 minutes
+   - Auto-escalate to Search Infra team after 10 minutes
+
+3. **Documented manual shard allocation procedure** in runbook section "Emergency Procedures"
+
+---
+
+### INC-2025-0142 — Product Feed Export Blocking Elasticsearch Reindex
+
+**Severity:** P2
+**Date:** 2025-03-11
+**Duration:** 3 hours 18 minutes
+**Status:** Resolved + Query Optimization Applied
+
+#### Description
+
+A scheduled reporting job (`daily_product_feed_export`) executes every 24 hours to generate a CSV export of all products for analytics. The job executes:
+```sql
+SELECT * FROM products WHERE 1=1 ORDER BY updated_at DESC
+```
+
+This query initiates a table scan without specifying a time window, locking the entire `products` table with a shared (read) lock. The lock persists for the entire export operation (7–12 minutes depending on table size).
+
+During this incident, the export ran at 10:45 UTC on 2025-03-11 while the reindex-worker was attempting to process a changelog batch. The reindex-worker reads the `products` table to fetch updated product metadata:
+```sql
+SELECT * FROM products WHERE id = ANY(changelog_ids) FOR UPDATE
+```
+
+The FOR UPDATE clause requires an exclusive lock, which was blocked by the shared lock from the reporting job. The reindex-worker stalled, unable to read product metadata. Consequently:
+- 2,800 changelog items queued, unable to be processed
+- 47 product changes (price updates, inventory adjustments) were not re-indexed into Elasticsearch
+- For 3 hours 18 minutes, customers querying search saw stale product data
+- 47 products served outdated prices or availability status
+
+#### Impact
+
+- **Unindexed changes:** 47 products not updated in Elasticsearch
+- **Stale data served:** Customers saw outdated prices for 47 products for 3+ hours
+- **Revenue loss:** Estimated 2–4 lost orders from customers seeing old pricing
+- **Reindex lag:** Index lag alert fired continuously; false positive from the reporting job
+
+#### Root Cause
+
+1. **Reporting job holds lock too long:** 7–12 minute table scan with shared lock blocks any concurrent exclusive locks
+2. **No transaction isolation:** Reporting job should use a snapshot isolation level or materialized view instead of live table scan
+3. **Missing lock timeout:** Reindex-worker did not have a lock acquisition timeout or retry logic
+
+#### Resolution Steps
+
+**Immediate (minute 0–5):**
+1. Detected alert: "index_lag_percent > 5% for >30 min" and "reindex_worker_queue_depth > 2000"
+   ```bash
+   redis-cli -h $REDIS_HOST LLEN changelog:queue
+   # Output: 2,847 pending items
+   ```
+
+2. **Checked for blocking queries:**
+   ```bash
+   psql -h $RDS_ENDPOINT -d ecommerce -c \
+     "SELECT pid, usename, query, state, wait_event FROM pg_stat_activity WHERE wait_event IS NOT NULL;"
+   # Output: reporting job holding AccessShareLock on products table
+   ```
+
+3. **Identified the reporting job:**
+   ```bash
+   psql -h $RDS_ENDPOINT -d ecommerce -c \
+     "SELECT query_start, query FROM pg_stat_activity WHERE query LIKE '%products%' AND state = 'active';"
+   # Output: daily_product_feed_export job (running since 10:45, elapsed 7 minutes)
+   ```
+
+4. **Killed the blocking reporting transaction:**
+   ```bash
+   psql -h $RDS_ENDPOINT -d ecommerce -c \
+     "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'reporting_user' AND query LIKE '%SELECT * FROM products%';"
+   # Output: 1 (one connection terminated)
+   ```
+
+**Short-term (minute 5–20):**
+5. **Reindex-worker automatically resumed** processing queued changelog items:
+   ```bash
+   # Monitored queue depth decline
+   watch "redis-cli -h $REDIS_HOST LLEN changelog:queue"
+   # Queue decreased from 2,847 → 0 in 8 minutes
+   ```
+
+6. **Verified Elasticsearch index lag recovered:**
+   ```bash
+   curl -s "http://elasticsearch:9200/_cat/indices?v" | grep products_live | awk '{print $6, $7}'
+   # Output: doc count matched PostgreSQL count within 60 seconds
+   ```
+
+7. **Re-ran reporting job with optimized query:**
+   ```bash
+   # Created materialized view snapshot first
+   psql -h $RDS_ENDPOINT -d ecommerce -c \
+     "CREATE TEMP TABLE temp_products_snapshot AS SELECT * FROM products; \
+      -- Report against snapshot; original table now unlocked
+      SELECT * FROM temp_products_snapshot ORDER BY updated_at DESC;" \
+     > /tmp/daily_feed.csv
+   ```
+
+#### Follow-up Actions
+
+**Completed:**
+1. **Optimized reporting job query:**
+   - Replaced full table scan with incremental export (delta from last 24 hours)
+   - Reduced lock duration from 7–12 minutes to <30 seconds
+   - Query now: `SELECT * FROM products WHERE updated_at > ?`
+
+2. **Added lock acquisition timeout to reindex-worker:**
+   ```python
+   # In backend/app/workers/tasks.py
+   with db.begin_nested():
+       session.execute(
+           text("SET statement_timeout = '5 second'")  # Fail fast if lock blocked
+       )
+       # Fetch products for reindex
+   ```
+
+3. **Added alert for long-running queries:**
+   - Alert if any query runs >5 minutes on `products` table
+   - Alert if reindex-worker queue depth >1000 for >30 seconds (indication of lock contention)
+
+---
+
 ## Failure Mode Catalog
 
 ### Failure Mode 1: Elasticsearch Split-Brain (Cluster Red, No Primary Shards)
@@ -1379,6 +1818,102 @@ curl -s http://catalog-api:8000/health | jq '.status'
 | **Pause reindex** | `redis-cli SET reindex:paused true EX 3600` |
 | **Scale workers** | `kubectl scale deployment/catalog-reindex-worker --replicas=8 -n ecommerce` |
 | **Check queue depth** | `redis-cli LLEN changelog:queue` |
+
+---
+
+## Inter-Service Impact Map
+
+When Product Catalog degrades, the cascade looks like:
+
+| Stage | Service | Impact | Time to Detect |
+|---|---|---|---|
+| Immediate | catalog-api | search returns stale/no results, inventory reads fail | <1 min |
+| +2 min | checkout-service | inventory checks fail or return stale data, oversells occur | +2 min |
+| +5 min | order-service | orders placed with incorrect pricing or inventory | +5 min |
+| +15 min | analytics-service | product data pipeline fails, reporting lag | +15 min |
+
+**How to read this:** If catalog-api is down/degraded for N minutes, expect these downstream impacts.
+
+### Isolation Actions
+
+**Enable search fallback:** If Elasticsearch is unavailable, query PostgreSQL directly (slower but working).
+- Activate via environment variable: `SEARCH_FALLBACK_ENABLED=true`
+- P99 latency will increase to 500–2000ms, but search will remain available
+- Verify fallback active: `curl http://catalog-api:8000/health | jq '.search_backend'`
+
+**Implement inventory circuit breaker:** If inventory reads fail >5 times in 1 minute, stop accepting new orders until resolved.
+- Configured in `backend/app/services/inventory.py` with circuit breaker threshold
+- When circuit opens, API returns 503 Service Unavailable (better than selling non-existent inventory)
+- Alert if circuit opens; escalate to Tier 2
+
+---
+
+## Rollback Decision Tree
+
+**When to rollback vs. hotfix:**
+
+### Step 1: Search P99 >500ms for >2 minutes?
+
+- **YES** → If from a recent deploy, rollback immediately
+  ```bash
+  kubectl rollout undo deployment/catalog-api -n ecommerce
+  kubectl rollout status deployment/catalog-api -n ecommerce --timeout=3m
+  ```
+  Verify search P99 <200ms within 1 minute. If not, escalate to Tier 2.
+
+- **NO** → Proceed to step 2
+
+### Step 2: Inventory reads returning stale data (confirmed)?
+
+- **YES** →
+  - If cache TTL config is wrong, hotfix by adjusting environment variable:
+    ```bash
+    kubectl set env deployment/catalog-api INVENTORY_CACHE_TTL_SECONDS=60 -n ecommerce
+    kubectl rollout status deployment/catalog-api -n ecommerce
+    ```
+  - If code issue (e.g., incorrect fallback logic), rollback:
+    ```bash
+    kubectl rollout undo deployment/catalog-api -n ecommerce
+    ```
+
+- **NO** → Proceed to step 3
+
+### Step 3: Elasticsearch cluster health RED?
+
+- **YES** → Manually trigger shard allocation:
+  ```bash
+  curl -X POST "http://elasticsearch:9200/_cluster/reroute?retry_failed=true"
+  ```
+  If no recovery in 10 minutes, escalate to Tier 2 (Search Infra team).
+
+- **NO** → Proceed to step 4
+
+### Step 4: Search results corrupt or query plan changed recently?
+
+- **YES** → Rollback immediately if from recent deploy:
+  ```bash
+  kubectl rollout undo deployment/catalog-api -n ecommerce
+  kubectl rollout status deployment/catalog-api -n ecommerce --timeout=3m
+  ```
+
+- **NO** → Hotfix approach; escalate to Tier 2 for investigation
+
+### Quick Rollback Command
+
+```bash
+kubectl rollout undo deployment/catalog-api -n ecommerce
+kubectl rollout status deployment/catalog-api -n ecommerce --timeout=3m
+```
+
+### Verification After Rollback
+
+- [ ] Search P99 latency <200ms (within 1 min)
+- [ ] Elasticsearch cluster health GREEN
+- [ ] Cache hit rate >80%
+- [ ] No new oversell reports (within 15 min)
+- [ ] Reindex queue depth <5000 items
+
+If any verification fails, escalate to Tier 2.
 
 ---
 
