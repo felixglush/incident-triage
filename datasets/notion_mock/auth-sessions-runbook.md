@@ -327,6 +327,350 @@ Email/password and Apple OAuth logins were unaffected.
 
 ---
 
+### INC-2024-0389 — Password Reset Token Redis Eviction Dropping Reset Requests
+
+**Severity:** P1 | **Date:** 2024-10-20 15:32–15:58 UTC | **Duration:** 26 minutes | **Users Affected:** ~340 unable to reset password
+
+**Description:**
+Password reset tokens are stored in Redis with a 30-minute TTL to allow users to reset credentials via emailed links. During a traffic spike on 2024-10-20, reset request volume spiked from the baseline ~100 req/min to ~800 req/min (8x). Each reset token occupies ~512 bytes in Redis. The session Redis instance began evicting data using LRU policy to stay below `maxmemory`. Reset tokens (with 30-minute TTL) started being evicted even though they were within their validity window.
+
+Users clicked reset links from emails, auth-service looked up the token in Redis (`password_reset_token:{token_hash}`), found nothing (evicted), and returned HTTP 400 "invalid or expired token". Users were unable to reset passwords and submitted support tickets claiming "password reset is broken".
+
+**Root Cause:**
+1. Password reset tokens shared the session Redis instance; both competed for memory
+2. LRU eviction policy made no distinction between session tokens (7-day TTL) and reset tokens (30-min TTL); both were candidates for eviction
+3. Reset token request surge was not capacity-planned; no headroom for spikes
+4. No alert on Redis memory utilization; only downstream errors visible
+5. No separate counter for reset token eviction; visibility gap
+
+**Impact:**
+- 340 users unable to complete password reset for 26 minutes
+- ~210 failed reset attempts (at 8 req/min × 26 minutes)
+- Customer support escalation; 45 support tickets filed
+- ~2% of daily password reset traffic lost (users may have given up)
+
+**Resolution Steps:**
+
+1. **Assess scope and confirm root cause (2 minutes):**
+   ```bash
+   # Check Redis session store memory
+   kubectl exec -it redis-sessions-0 -n ecommerce -- redis-cli
+   > INFO memory
+   # Output: used_memory_human:7.8G, maxmemory:8G, maxmemory_policy:allkeys-lru
+
+   # Check eviction rate
+   > INFO stats
+   # Output: evicted_keys:127834 (evictions spiked)
+
+   # Spot-check: try to fetch a known reset token
+   > GET password_reset_token:abc123
+   # Output: (nil)  — confirmed evicted
+   ```
+
+2. **Immediately increase maxmemory to create headroom (2 minutes):**
+   ```bash
+   kubectl exec -it redis-sessions-0 -n ecommerce -- redis-cli CONFIG SET maxmemory 12gb
+   kubectl exec -it redis-sessions-0 -n ecommerce -- redis-cli CONFIG REWRITE
+
+   # Verify
+   kubectl exec -it redis-sessions-0 -n ecommerce -- redis-cli CONFIG GET maxmemory
+   # Output: 1) "maxmemory"
+   #         2) "12gb"
+   ```
+
+3. **Monitor reset token requests (2 minutes):**
+   ```bash
+   # Check auth-service logs for reset success rate
+   kubectl logs deployment/auth-service -n ecommerce --since=5m | grep -c "reset_token_valid"
+   # Should see increasing count as headroom is restored
+   ```
+
+4. **Plan permanent split (offline planning):**
+   - Reset tokens (ephemeral, 30 min) → New Redis instance with volatile-lru policy
+   - Session tokens (persistent, 7 days) → Existing instance with allkeys-lru
+   - Rate limits → Third instance with volatile-lru
+
+5. **Deploy architectural fix (next sprint):**
+   - Migrate password reset to dedicated ephemeral Redis instance
+   - Document TTL tiers and memory calculations
+
+**Follow-up Actions:**
+- [ ] Split Redis into three instances: session (allkeys-lru), reset-tokens (volatile-lru), rate-limit (volatile-lru)
+- [ ] Add Redis eviction rate alert per key pattern (e.g., `password_reset_token:* evictions > 10/sec`)
+- [ ] Implement Redis memory usage breakdown by key prefix (session vs. reset vs. rate-limit)
+- [ ] Capacity-plan reset token surge (measure 99th percentile request volume)
+- [ ] Add circuit breaker: if reset token eviction rate >50/sec, temporarily disable password reset UI (show message: "Too many resets in flight; please try again in 5 minutes")
+
+---
+
+### INC-2025-0029 — Rate Limit Counter Race Condition Allowing Brute Force
+
+**Severity:** P2 | **Date:** 2025-02-01 08:45–09:15 UTC | **Duration:** 30 minutes (detection to fix) | **Impact:** Security vulnerability; 5 extra attempts per window bypassed
+
+**Description:**
+Rate limiting in auth-service was implemented as a two-step Redis operation:
+1. `GET rate_limit:ip:{ip}` (check current count)
+2. `INCR rate_limit:ip:{ip}` (increment and check limit)
+
+Due to high concurrency (multi-pod, multi-worker), a race condition existed between steps 1 and 2. When two requests from the same IP arrived within milliseconds, both could:
+1. Read counter value (e.g., 9)
+2. Both increment independently
+3. Both see count < 10 (limit) and proceed
+
+This allowed ~5 extra login attempts per window (per 60-second window) to bypass rate limiting. An attacker could attempt ~15 logins per minute instead of 10. The vulnerability was discovered during a security review, not actively exploited.
+
+**Root Cause:**
+1. Rate limit logic not atomic; two separate Redis commands allowed race condition
+2. No transactional wrapper (WATCH/MULTI/EXEC) to serialize reads/writes
+3. Code review missed the concurrency issue; no load test with concurrent requests from same IP
+
+**Impact:**
+- Brute force protection weakened; effective limit lowered by ~33%
+- Risk: accounts with weak passwords vulnerable to faster brute-force attempts
+- No evidence of active exploitation; discovered in code review before real-world incident
+- Potential impact scope: all login attempts from any given IP
+
+**Resolution Steps:**
+
+1. **Detect and confirm (2 minutes, automated in security scan):**
+   ```bash
+   # Review auth-service code
+   kubectl logs deployment/auth-service -n ecommerce | grep -A 5 "rate_limit.*GET"
+   # Spot pattern: separate GET and INCR commands, no atomicity
+
+   # Load test: simulate 100 concurrent requests from same IP
+   for i in {1..100}; do
+     curl -X POST http://localhost:8000/auth/login \
+       -H "X-Forwarded-For: 192.168.1.1" \
+       -d '{"username":"test","password":"wrong"}' &
+   done
+   wait
+   # Count success: should be 10 (limit), but if race condition exists, may allow 15–20
+   ```
+
+2. **Deploy atomic rate limit fix (5 minutes):**
+   ```bash
+   # Commit hotfix: use Redis INCR (atomic increment)
+   # Before:
+   #   count = redis.get(f"rate_limit:{ip}")
+   #   if count < 10: redis.incr(f"rate_limit:{ip}")
+
+   # After:
+   #   count = redis.incr(f"rate_limit:{ip}")
+   #   if count == 1: redis.expire(f"rate_limit:{ip}", 60)  # Set TTL only on first hit
+   #   if count > 10: return RateLimitExceeded()
+
+   # Build and deploy
+   git commit -m "fix: make rate limit counter atomic with INCR"
+   docker build -t ecommerce/auth-service:hotfix-ratelimit-atomic-20250201 .
+   kubectl set image deployment/auth-service \
+     auth-service=ecommerce/auth-service:hotfix-ratelimit-atomic-20250201 \
+     -n ecommerce
+   kubectl rollout status deployment/auth-service -n ecommerce
+   ```
+
+3. **Verify atomicity with load test (2 minutes):**
+   ```bash
+   # Re-run concurrent load test
+   for i in {1..100}; do
+     curl -X POST http://localhost:8000/auth/login \
+       -H "X-Forwarded-For: 192.168.1.2" \
+       -d '{"username":"test","password":"wrong"}' &
+   done
+   wait
+   # Count successful responses: should be exactly 10 (limit enforced)
+   ```
+
+**Follow-up Actions:**
+- [ ] Audit all Redis operations for atomicity; convert multi-step reads/writes to Lua scripts or WATCH/MULTI/EXEC
+- [ ] Add unit test: concurrent rate-limit requests from same IP, verify exactly N attempts allowed (no race condition)
+- [ ] Implement circuit breaker for brute-force attack detection: if IP exceeds limit >5 times in 10 minutes, temporarily block for 1 hour
+- [ ] Log all rate-limit violations (currently silent); forward to security team for trend analysis
+
+---
+
+### INC-2024-0234 — OIDC Redirect URL Misconfiguration Breaking Apple Login
+
+**Severity:** P1 | **Date:** 2024-08-03 14:22–14:26 UTC | **Duration:** 4 minutes | **Users Affected:** ~850 sessions, ~15% of iOS user base unable to login via Apple
+
+**Description:**
+Apple OAuth integration (`appleid.apple.com`) was configured in auth-service with an incorrect `redirect_uri` parameter. The config had:
+```
+APPLE_OAUTH_REDIRECT_URI=https://api-staging.ecommerce.internal/auth/callback/apple
+```
+
+But it should have been:
+```
+APPLE_OAUTH_REDIRECT_URI=https://api.ecommerce.internal/auth/callback/apple
+```
+
+When users on iOS tapped "Sign in with Apple", they were redirected to Apple's OAuth flow. After granting permission, Apple validated the `redirect_uri` against the registered values in Apple's developer console (which listed the production URL). The staging URL did not match, so Apple rejected the callback with HTTP 400 `invalid_redirect_uri`. Users were presented with a system error and unable to proceed.
+
+~15% of the user base uses Apple OAuth as primary login (mostly iOS users); ~850 sessions were impacted (estimate based on concurrent login attempts).
+
+**Root Cause:**
+1. Config copy-pasted from staging environment; developer forgot to update the domain
+2. No validation in code to warn if `redirect_uri` does not match OAuth provider config
+3. No integration test that exercises real Apple OAuth flow (tests mocked the provider)
+4. Staging and production configs were similar enough that code worked locally but failed in prod
+
+**Impact:**
+- 4-minute outage for Apple OAuth logins
+- ~850 attempted logins failed (at peak ~200 req/min × 4 min)
+- 8x support spike ("can't sign in with Apple on my iPhone")
+- iOS users stranded; no obvious fallback (email signup took extra steps)
+- Brand trust hit: customers questioned reliability
+
+**Resolution Steps:**
+
+1. **Detect issue (1 minute):**
+   ```bash
+   # Alert triggers: login_error_rate for "apple" OAuth provider >50%
+   kubectl logs deployment/auth-service -n ecommerce --since=5m | grep -i apple | tail -20
+   # Output: error: Apple OAuth callback failed: redirect_uri mismatch
+   ```
+
+2. **Identify root cause (1 minute):**
+   ```bash
+   # Check deployed config
+   kubectl get deployment auth-service -o yaml | grep -i "APPLE_OAUTH_REDIRECT_URI"
+   # Output: APPLE_OAUTH_REDIRECT_URI=https://api-staging.ecommerce.internal/auth/callback/apple
+   # ^ WRONG! Should be production domain
+   ```
+
+3. **Fix configuration (1 minute):**
+   ```bash
+   # Update config to correct production URL
+   kubectl set env deployment/auth-service \
+     APPLE_OAUTH_REDIRECT_URI=https://api.ecommerce.internal/auth/callback/apple \
+     -n ecommerce
+
+   # Verify
+   kubectl get deployment auth-service -o yaml | grep "APPLE_OAUTH_REDIRECT_URI"
+   ```
+
+4. **Restart pods to apply config (1 minute):**
+   ```bash
+   kubectl rollout restart deployment/auth-service -n ecommerce
+   kubectl rollout status deployment/auth-service -n ecommerce
+   ```
+
+5. **Verify recovery (1 minute):**
+   ```bash
+   # Test Apple OAuth flow with a test account
+   # Or monitor success rate spike
+   kubectl logs deployment/auth-service -n ecommerce --follow | grep "apple.*success"
+   # Should see success logs immediately
+   ```
+
+**Follow-up Actions:**
+- [ ] Add environment variable validation on startup: compare deployed redirect_uri against OAuth provider config via API
+- [ ] Implement pre-deploy verification: for each OAuth provider, validate redirect_uri by attempting a mock OAuth flow
+- [ ] Add unit test that validates all deployed environment variables match OAuth provider registrations
+- [ ] Automate config diff between staging and production in CI; alert on mismatches
+- [ ] Document "Apple OAuth Redirect URI" checklist for release notes
+
+---
+
+### INC-2025-0104 — Login Service Pod Restart Cascading from OOM
+
+**Severity:** P1 | **Date:** 2025-03-05 11:47–11:50 UTC | **Duration:** 3 minutes | **Users Affected:** ~100% of login attempts during outage
+
+**Description:**
+Auth-service pods began experiencing Out-Of-Memory (OOMKilled) restarts starting at 11:47 UTC. The container was configured with a 2GB memory limit; pods were hitting this limit and being evicted by the Kubernetes scheduler.
+
+Investigation revealed a memory leak in the JWT validation logic. When validating incoming JWTs, the code was caching the entire token object in memory (including all claims, signatures, metadata) for the lifetime of the request. Under normal load (~50 req/s), this added ~10MB per second to heap usage. The memory leak cascaded: heap grew from 1.2GB to 2GB within 3 minutes, triggering OOMKilled events.
+
+Users saw HTTP 503 Service Unavailable during the 3-minute window; login was completely unavailable.
+
+**Root Cause:**
+1. JWT validation cached entire token object instead of just claims
+2. Cache was never cleared between requests; it grew unbounded
+3. Memory limit (2GB) was too tight; no headroom for spikes
+4. No memory profiling in pre-production load testing; leak went undetected
+
+**Impact:**
+- 3-minute login outage; 100% of login attempts failed
+- ~150 login attempts blocked (at baseline 50 req/s × 3 minutes)
+- Pod restart thrashing; Kubernetes restarted pods every 30–60 seconds
+- Cascading impact on downstream services (checkout, etc.)
+
+**Resolution Steps:**
+
+1. **Detect and confirm OOM (1 minute):**
+   ```bash
+   # Check pod events for OOMKilled
+   kubectl get events -n ecommerce | grep -i oomkilled
+   # Output: Pod auth-service-abc123 OOMKilled
+
+   # Check memory limit
+   kubectl get pod auth-service-abc123 -n ecommerce -o yaml | grep memory
+   # Output: limits: memory: 2Gi
+
+   # Check heap usage right before OOMKilled
+   kubectl logs auth-service-abc123 -n ecommerce | grep -i "heap\|memory" | tail -5
+   # Output: heap_used_mb: 2048 (at limit)
+   ```
+
+2. **Immediately increase memory limit (1 minute):**
+   ```bash
+   # Increase memory limit to 4GB to stop OOMKill loop
+   kubectl set resources deployment/auth-service \
+     --limits=memory=4Gi \
+     -n ecommerce
+
+   # Force rollout to apply new limits
+   kubectl rollout restart deployment/auth-service -n ecommerce
+   kubectl rollout status deployment/auth-service -n ecommerce
+   ```
+
+3. **Verify recovery (1 minute):**
+   ```bash
+   # Check pods are running (not OOMKilled)
+   kubectl get pods -n ecommerce | grep auth-service
+   # Output: auth-service-xyz789 1/1 Running
+
+   # Monitor login success
+   kubectl logs deployment/auth-service -n ecommerce --follow | grep -c "login_success"
+   # Should see 50+ logins per second
+   ```
+
+4. **Deploy memory leak hotfix (offline, coordinated):**
+   ```bash
+   # Fix JWT validation logic: clear cache after validation
+   # Before:
+   #   token_cache[request_id] = full_token_object  # leak: never freed
+
+   # After:
+   #   claims = extract_claims(token)  # extract only needed data
+   #   validate(claims)  # validate claims only
+   #   # request ends; no cache, no leak
+
+   git commit -m "fix: remove full token object caching in JWT validation"
+   docker build -t ecommerce/auth-service:hotfix-jwt-memleak-20250305 .
+   kubectl set image deployment/auth-service \
+     auth-service=ecommerce/auth-service:hotfix-jwt-memleak-20250305 \
+     -n ecommerce
+   kubectl rollout status deployment/auth-service -n ecommerce
+   ```
+
+5. **Verify memory usage is stable (5 minutes):**
+   ```bash
+   # Monitor memory over time; should level off below 1GB
+   kubectl top pod -n ecommerce | grep auth-service
+   # Output:
+   # auth-service-xyz789  450Mi  (stable, no growth)
+   ```
+
+**Follow-up Actions:**
+- [ ] Add memory profiling to CI/CD load tests; detect heap growth >10% over 5 min
+- [ ] Implement memory usage dashboard: heap size, GC frequency, object count by type
+- [ ] Reduce memory limit back to 2GB only after leak is fixed and validated in staging
+- [ ] Add JVM heap dump on OOMKilled event (capture state for debugging)
+- [ ] Implement memory alert at 80% of limit (proactive, not reactive)
+
+---
+
 ## Failure Mode Catalog
 
 ### 1. Session Fixation After Redis Eviction
@@ -992,7 +1336,57 @@ LIMIT 10;
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2025-02-21
+## Inter-Service Impact Map
+
+When Auth & Sessions degrades, the cascade looks like:
+
+| Stage | Service | Impact | Time to Detect |
+|---|---|---|---|
+| Immediate | auth-service | login fails, session validation fails, 100% user requests rejected | <1 min |
+| +1 min | checkout-service | no authenticated users, checkout blocked | +1 min |
+| +2 min | api-gateway | all requests fail auth check, 401 errors | +2 min |
+| +5 min | customer-service | internal tools unreachable, unable to help customers | +5 min |
+
+**How to read this:** If auth-service is down, ALL downstream services fail within 1–2 minutes because they depend on token validation.
+
+**Isolation actions:**
+- Emergency bypass: enable guest checkout without login (feature flag)
+- Disable OAuth temporarily, force email auth only
+- Allow previously authenticated sessions to remain valid for longer
+
+---
+
+## Rollback Decision Tree
+
+**When to rollback vs. hotfix:**
+
+1. **Login error rate >10% for >1 minute?**
+   - YES → Immediate rollback if from recent deploy
+   - NO → Proceed to step 2
+
+2. **Session validation failing (tokens rejected)?**
+   - YES → If JWT key rotation just happened, hotfix with dual-key acceptance. If deploy, rollback.
+   - NO → Proceed to step 3
+
+3. **High confidence in root cause?**
+   - HIGH → Rollback if code issue, hotfix if config
+   - LOW → Wait for more telemetry
+
+**Quick rollback command:**
+```bash
+kubectl rollout undo deployment/auth-service -n ecommerce
+kubectl rollout status deployment/auth-service -n ecommerce --timeout=2m
+```
+
+**Verification after rollback:**
+- Login success rate >99%
+- Session validation latency <20ms P99
+- JWT token creation <100ms
+- No auth-related customer complaints
+
+---
+
+**Document Version:** 1.1
+**Last Updated:** 2025-03-21
 **Owner:** Identity Platform Team (@identity-platform-oncall)
 **Review Frequency:** Quarterly or after any P1+ incident
