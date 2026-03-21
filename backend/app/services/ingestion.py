@@ -8,7 +8,7 @@ from typing import Iterable, List, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import RunbookChunk
+from app.models import RunbookChunk, SourceDocument
 from app.services.embeddings import embed_text
 
 
@@ -75,6 +75,136 @@ def chunk_markdown(text: str, max_chars: int = 2400, overlap: int = 200) -> List
     return chunks
 
 
+def upsert_markdown_document(
+    db: Session,
+    *,
+    source_document: str,
+    source: str,
+    source_uri: Optional[str],
+    content: str,
+    tags: Optional[Iterable[str]] = None,
+    extra_metadata: Optional[dict] = None,
+) -> int:
+    tags = list(tags or [])
+    extra_metadata = dict(extra_metadata or {})
+    version_hash = compute_hash(content)
+    chunks = chunk_markdown(content)
+    document_title = extra_metadata.get("title")
+    if not document_title and chunks:
+        document_title = chunks[0].title
+
+    document_metadata = {
+        "tags": tags,
+        "source": source,
+        **extra_metadata,
+    }
+
+    existing_document = (
+        db.query(SourceDocument)
+        .filter(SourceDocument.source_document == source_document)
+        .filter(SourceDocument.source == source)
+        .first()
+    )
+
+    if existing_document:
+        document_changed = (
+            existing_document.version_hash != version_hash
+            or existing_document.source_uri != source_uri
+            or existing_document.title != document_title
+            or (existing_document.doc_metadata or {}) != document_metadata
+        )
+    else:
+        document_changed = True
+
+    if existing_document and not document_changed:
+        existing_chunk = (
+            db.query(RunbookChunk)
+            .filter(RunbookChunk.source_document == source_document)
+            .filter(RunbookChunk.source == source)
+            .first()
+        )
+        if existing_chunk and existing_chunk.doc_metadata and existing_chunk.doc_metadata.get("version_hash") == version_hash:
+            return 0
+
+    if existing_document:
+        existing_document.source_uri = source_uri
+        existing_document.title = document_title
+        existing_document.content = content
+        existing_document.version_hash = version_hash
+        existing_document.doc_metadata = document_metadata
+        db.add(existing_document)
+    else:
+        db.add(
+            SourceDocument(
+                source_document=source_document,
+                source=source,
+                source_uri=source_uri,
+                title=document_title,
+                content=content,
+                version_hash=version_hash,
+                doc_metadata=document_metadata,
+            )
+        )
+
+    if not document_changed:
+        return 0
+
+    db.query(RunbookChunk).filter(
+        RunbookChunk.source_document == source_document,
+        RunbookChunk.source == source,
+    ).delete()
+
+    inserted = 0
+    for chunk in chunks:
+        metadata = {
+            "tags": tags,
+            "source": source,
+            "version_hash": version_hash,
+            "title": chunk.title,
+            **extra_metadata,
+        }
+        search_text = f"{chunk.title or ''} {chunk.content}".strip()
+        db.add(
+            RunbookChunk(
+                source_document=source_document,
+                chunk_index=chunk.chunk_index,
+                title=chunk.title,
+                content=chunk.content,
+                search_tsv=func.to_tsvector("english", search_text),
+                embedding=embed_text(chunk.content),
+                doc_metadata=metadata,
+                source=source,
+                source_uri=source_uri,
+            )
+        )
+        inserted += 1
+
+    return inserted
+
+
+def delete_source_documents(
+    db: Session,
+    *,
+    source: str,
+    source_documents: Iterable[str],
+) -> int:
+    documents = {item for item in source_documents if item}
+    if not documents:
+        return 0
+
+    deleted = (
+        db.query(RunbookChunk)
+        .filter(RunbookChunk.source == source)
+        .filter(RunbookChunk.source_document.in_(documents))
+        .delete(synchronize_session=False)
+    )
+    db.query(SourceDocument).filter(
+        SourceDocument.source == source,
+        SourceDocument.source_document.in_(documents),
+    ).delete(synchronize_session=False)
+    return deleted
+
+
 def ingest_folder(
     db: Session,
     folder: Path,
@@ -87,45 +217,14 @@ def ingest_folder(
         if path.name.lower().startswith("readme"):
             continue
         content = path.read_text(encoding="utf-8")
-        version_hash = compute_hash(content)
-        chunks = chunk_markdown(content)
-
-        existing = (
-            db.query(RunbookChunk)
-            .filter(RunbookChunk.source_document == path.name)
-            .filter(RunbookChunk.source == source)
-            .first()
+        inserted += upsert_markdown_document(
+            db,
+            source_document=path.name,
+            source=source,
+            source_uri=str(path),
+            content=content,
+            tags=tags,
         )
-        if existing and existing.doc_metadata and existing.doc_metadata.get("version_hash") == version_hash:
-            continue
-
-        db.query(RunbookChunk).filter(
-            RunbookChunk.source_document == path.name,
-            RunbookChunk.source == source,
-        ).delete()
-
-        for chunk in chunks:
-            metadata = {
-                "tags": tags,
-                "source": source,
-                "version_hash": version_hash,
-                "title": chunk.title,
-            }
-            search_text = f"{chunk.title or ''} {chunk.content}".strip()
-            db.add(
-                RunbookChunk(
-                    source_document=path.name,
-                    chunk_index=chunk.chunk_index,
-                    title=chunk.title,
-                    content=chunk.content,
-                    search_tsv=func.to_tsvector("english", search_text),
-                    embedding=embed_text(chunk.content),
-                    doc_metadata=metadata,
-                    source=source,
-                    source_uri=str(path),
-                )
-            )
-            inserted += 1
 
     db.commit()
     return inserted

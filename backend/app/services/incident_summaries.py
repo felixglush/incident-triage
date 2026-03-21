@@ -44,7 +44,8 @@ def _build_next_steps(
 
     if runbook_chunks:
         chunk = runbook_chunks[0]["chunk"]
-        steps.append(f"Check runbook: {chunk.source_document} (chunk {chunk.chunk_index})")
+        label = chunk.title or chunk.source_document
+        steps.append(f"Check runbook: {label} (chunk {chunk.chunk_index})")
 
     if not steps:
         steps.append("Gather additional context from logs and metrics")
@@ -98,13 +99,14 @@ def generate_summary(
             chunk = item["chunk"]
             score = round(item["score"], 3)
             summary_lines.append(
-                f"- {chunk.source_document} (chunk {chunk.chunk_index})"
+                f"- {(chunk.title or chunk.source_document)} (chunk {chunk.chunk_index})"
             )
             citations.append({
                 "type": "runbook",
                 "source_document": chunk.source_document,
                 "chunk_index": chunk.chunk_index,
                 "title": chunk.title,
+                "source_uri": chunk.source_uri,
                 "score": score,
             })
 

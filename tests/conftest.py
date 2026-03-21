@@ -103,12 +103,14 @@ def db_session(request, setup_test_database) -> Generator[Session, None, None]:
         yield session
 
         # Clean up all test data in reverse dependency order
-        from app.models import IncidentAction, Alert, Incident, RunbookChunk
+        from app.models import IncidentAction, Alert, Incident, RunbookChunk, SourceDocument, Connector
 
         session.query(IncidentAction).delete()
         session.query(Alert).delete()
         session.query(Incident).delete()
         session.query(RunbookChunk).delete()
+        session.query(SourceDocument).delete()
+        session.query(Connector).delete()
         session.commit()
         session.close()
     else:

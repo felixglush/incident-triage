@@ -215,8 +215,10 @@ class TestIncidentSummaries:
             source_document="queue-runbook.md",
             chunk_index=0,
             title="Queue Troubleshooting",
-            content="Check worker health and backlog depth.",
+            content="Queue depth high in production. Check worker health and backlog depth before draining consumers.",
             doc_metadata={"tags": ["queue"]},
+            source="notion",
+            source_uri="https://www.notion.so/queue-troubleshooting",
         )
         db_session.add(runbook)
         db_session.commit()

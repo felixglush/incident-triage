@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.models import RunbookChunk
+from app.models import RunbookChunk, SourceDocument
 from app.services.ingestion import ingest_folder
 
 
@@ -15,5 +15,13 @@ def test_ingest_folder_inserts_chunks(tmp_path: Path, db_session):
     assert inserted > 0
 
     chunks = db_session.query(RunbookChunk).filter(RunbookChunk.source_document == "sample.md").all()
+    document = (
+        db_session.query(SourceDocument)
+        .filter(SourceDocument.source_document == "sample.md", SourceDocument.source == "runbooks")
+        .first()
+    )
     assert len(chunks) > 0
     assert chunks[0].source == "runbooks"
+    assert document is not None
+    assert document.title == "Title"
+    assert "Body paragraph." in document.content

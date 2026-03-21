@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from sqlalchemy import text
 from app.database import init_db, drop_db, check_connection, engine
 from app.models.database import (
-    Alert, Incident, IncidentAction, RunbookChunk, Connector, ConnectorStatus,
+    Alert, Incident, IncidentAction, RunbookChunk, SourceDocument, Connector, ConnectorStatus,
     SeverityLevel, IncidentStatus, ActionType
 )
 from app.services.ingestion import ingest_folder
@@ -149,12 +149,9 @@ def create_seed_data():
 
         # Create sample connectors (only webhooks implemented are connected)
         connectors = [
-            Connector(id="notion", name="Notion", status=ConnectorStatus.NOT_CONNECTED, detail="Runbook sync"),
-            Connector(id="slack", name="Slack", status=ConnectorStatus.NOT_CONNECTED, detail="Incident channel history"),
-            Connector(id="linear", name="Linear", status=ConnectorStatus.NOT_CONNECTED, detail="Issue context"),
-            Connector(id="datadog", name="Datadog", status=ConnectorStatus.CONNECTED, detail="Metrics and alerts"),
-            Connector(id="sentry", name="Sentry", status=ConnectorStatus.CONNECTED, detail="Error tracking"),
-            Connector(id="pagerduty", name="PagerDuty", status=ConnectorStatus.NOT_CONNECTED, detail="On-call scheduling"),
+            Connector(id="notion", name="Notion", provider="notion", status=ConnectorStatus.NOT_CONNECTED, detail="Knowledge sync"),
+            Connector(id="datadog", name="Datadog", provider="datadog", status=ConnectorStatus.CONNECTED, detail="Metrics and alerts"),
+            Connector(id="sentry", name="Sentry", provider="sentry", status=ConnectorStatus.CONNECTED, detail="Error tracking"),
         ]
         db.add_all(connectors)
 
