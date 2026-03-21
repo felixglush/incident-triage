@@ -283,6 +283,280 @@ The `webhook_delivery_merchant_4892` queue consumed ~2 GB of RabbitMQ memory. Ov
 
 ---
 
+### INC-2024-0298 — Message Encoding Mismatch Breaking Webhook Worker
+
+**Date:** 2024-09-18
+**Severity:** P1 (High)
+**Duration:** 45 minutes (11:15 UTC to 12:00 UTC)
+**Affected Services:** Webhook delivery
+**Customer Impact:** 12,000 webhooks queued for 1 hour; merchant integrations stalled; incomplete webhook delivery
+
+**Description:**
+
+A deploy changed the message encoding from UTF-8 to UTF-16 in the message serializer. The `webhook-worker` code was hardcoded to expect UTF-8 and attempted to decode all payloads as UTF-8. When the first UTF-16 message arrived, the decoder threw `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0`, causing the worker to crash.
+
+All 4 `webhook-worker` replicas crashed within 30 seconds. Over 60 minutes, 12,000 webhook delivery messages accumulated in the `webhook_delivery` queue with no workers consuming them.
+
+**Root Cause:**
+
+- Deploy changed message encoding globally without coordination with worker code.
+- No pre-deploy validation that encoding matches what workers expect.
+- Worker used hardcoded encoding instead of reading from message headers.
+- No integration test covering encoding/decoding round-trip.
+
+**Resolution Steps:**
+
+1. **Immediately rollback the encoding change deploy:**
+   ```bash
+   kubectl rollout undo deployment/webhook-worker -n ecommerce
+   kubectl rollout status deployment/webhook-worker -n ecommerce --timeout=3m
+   ```
+   Workers recover within 30 seconds as they restart with the previous encoding.
+
+2. **Verify pods are running:**
+   ```bash
+   kubectl get pods -n ecommerce -l app=webhook-worker
+   ```
+
+3. **Check queue depth (should be 12,000+):**
+   ```bash
+   curl -s -u admin:${RABBITMQ_PASSWORD} \
+     http://rabbitmq:15672/api/queues/%2F/webhook_delivery | jq '.messages'
+   ```
+
+4. **Monitor queue drain (messages should decrease):**
+   ```bash
+   watch -n 30 "curl -s -u admin:${RABBITMQ_PASSWORD} \
+     http://rabbitmq:15672/api/queues/%2F/webhook_delivery | jq '.messages'"
+   ```
+   Queue should drain at ~400 msgs/min with 4 replicas; complete in ~30 min.
+
+5. **Verify DLQ is empty (no webhook delivery failures):**
+   ```bash
+   curl -s -u admin:${RABBITMQ_PASSWORD} \
+     http://rabbitmq:15672/api/queues/%2F/webhook_delivery_dlq | jq '.messages'
+   ```
+
+**Follow-up Actions:**
+
+- Modified message serializer to include encoding in message headers; worker reads header instead of assuming.
+- Added integration test for UTF-8 and UTF-16 message serialization/deserialization round-trip.
+- Updated CI to validate message encoding consistency across all worker types before merge.
+
+---
+
+### INC-2025-0073 — Celery Task Timeout Too Short for Large Orders
+
+**Date:** 2025-03-03
+**Severity:** P1 (High)
+**Duration:** 120 minutes (09:30 UTC to 11:30 UTC)
+**Affected Services:** Order processing
+**Customer Impact:** ~850 large orders (>100 line items) processed twice; duplicate payments, duplicate inventory holds; customer complaints
+
+**Description:**
+
+The `order-worker` had a Celery task timeout of 60 seconds. A code change added comprehensive inventory checks and fraud detection logic, increasing task execution time for large orders (>100 line items). Orders with 100–200 line items now took 75–95 seconds to process. When the 60-second timeout fired, the task was marked as failed and automatically retried. Some orders were processed and paid twice before being noticed.
+
+Monitoring showed 850 task retries over 2 hours for the same order IDs, indicating a systematic timeout issue.
+
+**Root Cause:**
+
+- Task timeout was not updated when logic was added.
+- No pre-deploy load test simulating large orders (>100 line items).
+- Celery auto-retry was triggering false failures on slow but successful tasks.
+- No per-task idempotency key to prevent duplicate processing.
+
+**Resolution Steps:**
+
+1. **Immediately increase the Celery task timeout:**
+   ```bash
+   kubectl set env deployment/order-worker -n ecommerce CELERY_TASK_TIME_LIMIT=180
+   kubectl rollout restart deployment/order-worker -n ecommerce
+   ```
+   Increase timeout from 60s to 180s to accommodate large order processing.
+
+2. **Verify deployment is rolling out:**
+   ```bash
+   kubectl rollout status deployment/order-worker -n ecommerce --timeout=5m
+   ```
+
+3. **Monitor task error rate (should drop to near 0%):**
+   ```bash
+   kubectl logs deployment/order-worker -n ecommerce --tail=50 \
+     | grep -c "task timeout"
+   ```
+
+4. **Check for duplicate orders in database:**
+   ```bash
+   psql ${DATABASE_URL} <<EOF
+   SELECT order_id, COUNT(*) as count FROM orders
+   WHERE created_at > now() - interval '3 hours'
+   GROUP BY order_id HAVING COUNT(*) > 1;
+   EOF
+   ```
+
+5. **If duplicates found, escalate to Payments team for refund reconciliation:**
+   - Identify duplicate payment charges and issue refunds.
+   - Consolidate inventory holds to single order.
+
+**Follow-up Actions:**
+
+- Increased base Celery task timeout from 60s to 180s in config.
+- Added per-order idempotency key; worker checks if order was already processed before executing (upsert logic).
+- Implemented pre-deploy load test with orders >100 line items; measure actual execution time and set timeout to 1.5x max observed.
+- Added task execution time metrics/histogram to monitor slow tasks (P99 latency).
+
+---
+
+### INC-2024-0412 — Notification Queue Memory Leak from Unserialized Attachments
+
+**Date:** 2024-11-25
+**Severity:** P1 (High)
+**Duration:** 480 minutes (08:00 UTC to 16:00 UTC)
+**Affected Services:** Notification delivery (email, SMS, push)
+**Customer Impact:** 300,000+ notifications queued or undelivered; customers did not receive order status updates, shipping confirmations
+
+**Description:**
+
+The `notification-worker` code cached email attachment objects (file handles, binary data) in memory without clearing them after processing. As the worker processed messages sequentially, attachment objects accumulated in the Python process memory. Over 8 hours of continuous processing, memory usage grew from 100 MB to 2.0 GB, eventually hitting the pod memory limit (2 GB) and triggering an OOM (Out-of-Memory) kill.
+
+The pod would restart, process more messages, and memory would grow again—creating a cycle of crashes and restarts. All 6 replicas were cycling in and out of `OOMKilled` state. No notifications were being delivered reliably.
+
+**Root Cause:**
+
+- Attachment objects cached in worker process memory without cleanup.
+- No periodic garbage collection or cache eviction.
+- Worker did not implement `del` or clear() after processing each message.
+- No memory monitoring or alert for worker memory growth.
+
+**Resolution Steps:**
+
+1. **Immediately patch the worker to clear attachment cache after each message:**
+   ```bash
+   # Push hot-fix patch:
+   # In notification-worker code, after processing each message, add:
+   #   attachment_cache.clear()
+   #   gc.collect()  # Force garbage collection
+
+   kubectl set image deployment/notification-worker -n ecommerce \
+     notification-worker=your-registry/notification-worker:fix-mem-leak
+   kubectl rollout restart deployment/notification-worker -n ecommerce
+   ```
+
+2. **Verify deployment is healthy (pods should stay running, not restart):**
+   ```bash
+   kubectl get pods -n ecommerce -l app=notification-worker -w
+   # Wait 5 min; pods should stay Running without restarts.
+   ```
+
+3. **Monitor memory usage (should stabilize ~150–200 MB per pod):**
+   ```bash
+   kubectl top pods -n ecommerce -l app=notification-worker
+   ```
+
+4. **Monitor queue drain (notifications should start being delivered):**
+   ```bash
+   watch -n 30 "curl -s -u admin:${RABBITMQ_PASSWORD} \
+     http://rabbitmq:15672/api/queues/%2F/notification_queue | jq '.messages'"
+   ```
+
+5. **Verify no messages in DLQ (should be 0):**
+   ```bash
+   curl -s -u admin:${RABBITMQ_PASSWORD} \
+     http://rabbitmq:15672/api/queues/%2F/notification_dlq | jq '.messages'
+   ```
+
+**Follow-up Actions:**
+
+- Modified worker to call `attachment_cache.clear()` after every 100 processed messages (batched cleanup).
+- Implemented memory monitoring alert: alert if worker pod memory >75% of limit for >5 min.
+- Added explicit `del attachment_object` and `gc.collect()` in worker message handler.
+- Unit tests added to verify memory usage stays stable after processing 1000+ messages.
+- Reduced pod memory limit alert threshold from 80% to 70% for faster detection.
+
+---
+
+### INC-2024-0156 — RabbitMQ Cluster Majority Loss During Node Failure
+
+**Date:** 2024-07-08
+**Severity:** P0 (Critical)
+**Duration:** 12 minutes (10:08 UTC to 10:20 UTC)
+**Affected Services:** All queue workers, order processing, notifications, webhooks
+**Customer Impact:** Complete service outage; all queues unavailable; 8,500 pending orders; estimated $150k revenue impact
+
+**Description:**
+
+The RabbitMQ cluster ran with 3 nodes (`rabbitmq-0`, `rabbitmq-1`, `rabbitmq-2`). A Kubernetes node hosting `rabbitmq-1` failed due to disk corruption. The node was automatically evicted by Kubernetes. However, quorum queues require a quorum (>50%) to be available. With 3 nodes, a quorum is 2/3 (need at least 2 nodes).
+
+When `rabbitmq-1` went down, only `rabbitmq-0` and `rabbitmq-2` remained. A 2-node quorum in a 3-node cluster is still a quorum (2/3 ≈ 67%), so theoretically queues should remain available. However, RabbitMQ's quorum algorithm was conservative: it waited 30 seconds for the failed node to rejoin before declaring it permanently lost. During those 30 seconds, all quorum queues became unavailable to prevent split-brain scenarios.
+
+For 12 minutes (while waiting for automation to scale down and replace the failed node), the broker was unavailable. All workers stalled. Order processing halted completely.
+
+**Root Cause:**
+
+- 3-node RabbitMQ cluster can tolerate only 1 node failure; 2 simultaneous failures cause loss of quorum.
+- No automated node replacement in infrastructure-as-code.
+- No monitoring or alerting for broker cluster quorum loss.
+- Broker quorum timeout (30s) meant a brief node failure caused 12 min of complete unavailability due to slow Kubernetes node recovery automation.
+
+**Resolution Steps:**
+
+1. **Declare emergency and page on-call VP (P0 incident):**
+   ```bash
+   # Alert fires automatically on broker unavailability
+   # Human responder joins war room
+   ```
+
+2. **Check RabbitMQ cluster status (should show 2 nodes, 1 down):**
+   ```bash
+   kubectl get pods -n ecommerce -l app=rabbitmq
+   # One pod should be Missing or Pending
+   ```
+
+3. **Option A (preferred): Wait for Kubernetes to auto-replace the failed node (faster than manual intervention):**
+   - Kubernetes should automatically spawn a replacement pod on a healthy node.
+   - Monitor: `kubectl get pods -n ecommerce -l app=rabbitmq -w`
+   - Wait ~3 minutes for new pod to start and rejoin cluster.
+   - Once 3 nodes are Back Online, quorum is restored immediately.
+
+4. **Option B (if auto-replacement fails): Manually force removal of the failed node from cluster:**
+   ```bash
+   # Connect to a live node (e.g., rabbitmq-0)
+   kubectl exec rabbitmq-0 -n ecommerce -- \
+     rabbitmqctl forget_cluster_node rabbit@rabbitmq-1
+   ```
+   WARNING: Only do this if the node is definitely dead and won't rejoin.
+
+5. **Verify broker is responsive:**
+   ```bash
+   curl -s -u admin:${RABBITMQ_PASSWORD} \
+     http://rabbitmq:15672/api/overview | jq '.node.running'
+   # Should return: true
+   ```
+
+6. **Verify all queues are available:**
+   ```bash
+   curl -s -u admin:${RABBITMQ_PASSWORD} \
+     http://rabbitmq:15672/api/queues | jq 'length'
+   # Should list all queues with message counts
+   ```
+
+7. **Resume workers and monitor recovery:**
+   ```bash
+   kubectl get pods -n ecommerce -l app=order-worker
+   # Workers should automatically reconnect and resume processing
+   ```
+
+**Follow-up Actions:**
+
+- Scaled RabbitMQ cluster from 3 to 5 nodes. A 5-node cluster can tolerate 2 simultaneous node failures (requires 3/5 quorum). Significantly improves availability.
+- Updated Kubernetes StatefulSet with `podDisruptionBudget` to ensure at least 3 RabbitMQ nodes are always up (prevents accidental evictions).
+- Implemented automated node replacement: failed nodes are detected and replaced within 1 minute (faster than manual intervention).
+- Added monitoring for cluster quorum status: alert if fewer than 3 nodes healthy.
+- Documented disaster recovery runbook: procedures for 2-node cluster recovery and cluster rebuild from scratch.
+
+---
+
 ## Failure Mode Catalog
 
 ### 1. DLQ Overflow / Messages Lost
@@ -665,3 +939,50 @@ curl -s -u admin:${RABBITMQ_PASSWORD} http://rabbitmq:15672/api/queues/%2F/order
 - **RabbitMQ admin:** vault → `rabbitmq_admin_user`, `rabbitmq_admin_password`
 - **Slack channel:** #incident-triage
 - **Status page:** status.company.com
+
+---
+
+## Inter-Service Impact Map
+
+When Queue & Workers degrades, the cascade looks like:
+
+| Stage | Service | Impact | Time to Detect |
+|---|---|---|---|
+| Immediate | broker (RabbitMQ) | all workers stalled, queues back up | <1 min |
+| +2 min | order-service | can't enqueue orders for processing, orders sit pending | +2 min |
+| +5 min | checkout-service | order creation RPC times out, checkout fails | +5 min |
+| +10 min | notification-service | customer emails don't send, angry support tickets | +10 min |
+
+**How to read this:** If broker is down, every downstream service fails in rapid succession.
+
+**Isolation actions:** Circuit breaker on checkout-service: if order-service queue times out, fail fast instead of hanging. Scale workers aggressively to drain backlog.
+
+---
+
+## Rollback Decision Tree
+
+**When to rollback vs. hotfix:**
+
+1. Order queue depth >50k for >5 minutes?
+   - YES → Scale workers first (faster relief). Rollback only if worker crash loop.
+   - NO → Proceed to step 2
+
+2. DLQ receiving order messages (failures, not just backlog)?
+   - YES → If from recent worker deploy, rollback. If message format issue, hotfix.
+   - NO → Proceed to step 3
+
+3. Broker health OK (RabbitMQ cluster GREEN)?
+   - YES → Wait; queue will drain as workers process. Monitor drain rate.
+   - NO → Page on-call immediately. Broker down = P0.
+
+**Quick rollback command:**
+```bash
+kubectl rollout undo deployment/order-worker -n ecommerce
+kubectl rollout status deployment/order-worker -n ecommerce --timeout=3m
+```
+
+**Verification after rollback:**
+- Order queue drain rate positive (depth decreasing)
+- DLQ empty (no order failures)
+- Worker CPU and memory normal
+- No new orders stuck pending
