@@ -145,6 +145,8 @@ def main():
         sys.exit(1)
 
     md_files = sorted(MOCK_DIR.glob("*.md"))
+    md_files.extend(sorted(MOCK_DIR.glob("*/*.md")))
+    md_files = sorted(set(md_files))  # Remove duplicates and sort
     if not md_files:
         print(f"No .md files found in {MOCK_DIR}")
         sys.exit(1)

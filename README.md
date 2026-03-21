@@ -25,6 +25,8 @@ Services:
 Notes:
 - `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are optional for basic flows, but required
   for LLM-backed summaries/classification.
+- `NOTION_TOKEN` is required for the Notion connector.
+- `NOTION_API_VERSION` defaults to `2026-03-11` if not set.
 - `SKIP_SIGNATURE_VERIFICATION` is set to `true` in `docker-compose.yml` for local dev.
 
 ### Run Tests
@@ -52,6 +54,43 @@ More commands and troubleshooting: see `tests/README.md`.
 - `docs/`: Architecture and supporting documentation
 
 ## Documentation
+
+### Operational Runbooks
+
+Comprehensive on-call runbooks and incident documentation are stored in `datasets/notion_mock/` and synced to the Notion connector for RAG retrieval.
+
+**6 Service Runbooks** (~8,000 lines, ~45,000 words):
+- Checkout & Payments (1,573 lines, 1,266 Notion blocks)
+- Product Catalog (1,922 lines, 1,531 Notion blocks)
+- CDN & Storefront (1,303 lines, 1,022 Notion blocks)
+- Auth & Sessions (1,392 lines, 1,097 Notion blocks)
+- Queue & Workers (988 lines, 744 Notion blocks)
+- Database & Cache (857 lines, 667 Notion blocks)
+
+Each runbook includes:
+- Service overview and architecture
+- 7 recorded incidents with timeline, root cause, and resolution steps
+- Failure mode catalog with diagnosis and remediation
+- Runbook procedures (deployment, failover, scaling, rollback)
+- Monitoring & alerts with thresholds
+- Inter-service impact maps showing cascade effects
+- Rollback decision trees for go/no-go choices
+- Escalation policy and communication templates
+
+**18 Postmortems** (~1,600 lines, ~9,000 words, 1 per original incident):
+- Executive summary, timeline, root cause analysis (5 Whys)
+- Contributing factors, remediation, action items
+- Lessons learned and follow-up recommendations
+
+**6 Pre-Action Checklists** (~750 lines, ~5,600 words):
+- Pre-deploy, pre-sale, pre-maintenance workflows
+- Service-specific verification steps and quick-start commands
+
+**Total operational documentation: ~10,400 lines, ~59,600 words** (equivalent to a 180-page technical manual).
+
+All documents are pushed to Notion and synced via the Notion connector for RAG-powered incident assistance.
+
+### Project Documentation
 - `implementation.md`: Delivery phases and goals
 - `ROADMAP.md`: Milestones and exit criteria
 - `docs/architecture.md`: Architecture and data flow
@@ -59,3 +98,22 @@ More commands and troubleshooting: see `tests/README.md`.
 ## Development Notes
 - Webhook processing is async; classification defaults safely on failure.
 - Use `SKIP_SIGNATURE_VERIFICATION=true` only in development.
+
+## Notion Connector Setup
+1. Create a Notion **internal integration** in the workspace you want to sync.
+2. Grant it read-oriented access for page content.
+3. Share one or more designated root page subtrees (for example `OpsRelay Knowledge`, `Runbooks`, `Postmortems`) with the integration.
+4. Add the token to `/Users/felix/incident-triage/.env`:
+
+```env
+NOTION_TOKEN=secret_xxx
+NOTION_API_VERSION=2026-03-11
+```
+
+5. Open `http://localhost:3001/connectors`, paste one Notion root page URL or ID per line into the Notion card, then click `Save Root Pages`.
+6. Click `Sync Now` to ingest the shared subtree into the local knowledge index.
+
+Notes:
+- The connector syncs one or more configured **root page subtrees**, not the entire workspace.
+- Synced Notion content is stored locally and retrieved through the existing hybrid search path.
+- Notion webhooks are not part of v1; manual sync is the default refresh path for now.

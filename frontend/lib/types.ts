@@ -126,13 +126,37 @@ export type RunbookSearchResponse = {
 export type Connector = {
   id: string;
   name: string;
+  provider?: string | null;
   status: string;
   detail?: string | null;
+  root_pages?: { page_id: string; page_url?: string | null }[] | null;
+  workspace_name?: string | null;
+  last_synced_at?: string | null;
+  last_sync_status?: string | null;
+  last_sync_error?: string | null;
+  config?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
   updated_at?: string | null;
 };
 
 export type ConnectorListResponse = {
   items: Connector[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type ConnectorPage = {
+  page_id: string;
+  title: string;
+  page_url?: string | null;
+  root_page_id?: string | null;
+  last_edited_time?: string | null;
+  chunk_count: number;
+};
+
+export type ConnectorPageListResponse = {
+  items: ConnectorPage[];
   total: number;
   limit: number;
   offset: number;

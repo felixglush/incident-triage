@@ -40,6 +40,15 @@ class ConnectorStatus(str, enum.Enum):
     CONNECTED = "connected"
     NOT_CONNECTED = "not_connected"
 
+
+class ConnectorSyncStatus(str, enum.Enum):
+    """Connector sync execution states."""
+    IDLE = "idle"
+    SYNCING = "syncing"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 class ActionType(str, enum.Enum):
     """Types of incident actions for audit trail"""
     STATUS_CHANGE = "status_change"
@@ -418,6 +427,38 @@ class RunbookChunk(Base):
         return f"<RunbookChunk(id={self.id}, document={self.source_document}, chunk={self.chunk_index})>"
 
 
+class SourceDocument(Base):
+    """
+    Stores the latest canonical source document content before chunking.
+
+    This gives ingestion a stable raw-document layer so chunking strategies can
+    be rerun without re-fetching upstream systems.
+    """
+    __tablename__ = "source_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    source_document = Column(String(500), nullable=False, index=True)
+    source = Column(String(50), nullable=False, default="runbooks", index=True)
+    source_uri = Column(String(500))
+
+    title = Column(String(500))
+    content = Column(Text, nullable=False)
+    version_hash = Column(String(64), nullable=False, index=True)
+    doc_metadata = Column(JSONB)
+
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("source_document", "source", name="uq_source_document_source"),
+        Index("ix_source_documents_source_updated", "source", "updated_at"),
+    )
+
+    def __repr__(self):
+        return f"<SourceDocument(id={self.id}, document={self.source_document}, source={self.source})>"
+
+
 class Connector(Base):
     """
     Connector model stores third-party integration status.
@@ -426,8 +467,19 @@ class Connector(Base):
 
     id = Column(String(100), primary_key=True)
     name = Column(String(200), nullable=False)
+    provider = Column(String(100), nullable=False, index=True)
     status = Column(Enum(ConnectorStatus), default=ConnectorStatus.NOT_CONNECTED, nullable=False, index=True)
     detail = Column(String(500))
+    root_page_id = Column(String(100), index=True)
+    root_page_url = Column(String(500))
+    workspace_name = Column(String(255))
+    last_synced_at = Column(DateTime(timezone=True))
+    last_sync_status = Column(Enum(ConnectorSyncStatus), default=ConnectorSyncStatus.IDLE, nullable=False)
+    last_sync_error = Column(Text)
+    last_sync_cursor = Column(String(255))
+    webhook_subscription_id = Column(String(255))
+    config_json = Column(JSONB)
+    metadata_json = Column(JSONB)
 
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
@@ -440,6 +492,8 @@ class Connector(Base):
 @event.listens_for(Alert, "before_update")
 @event.listens_for(Incident, "before_update")
 @event.listens_for(RunbookChunk, "before_update")
+@event.listens_for(SourceDocument, "before_update")
+@event.listens_for(Connector, "before_update")
 def receive_before_update(_mapper, _connection, target):
     """Automatically update updated_at timestamp on any model change"""
     target.updated_at = utcnow()

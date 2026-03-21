@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from app.database import get_db
 from app.models import RunbookChunk
@@ -55,10 +56,17 @@ def build_runbook_index(chunks: list[RunbookChunk]) -> list[dict]:
 
 
 @router.get("")
-def list_runbooks(limit: int = 100, offset: int = 0, db: Session = Depends(get_db)):
+def list_runbooks(
+    limit: int = 100,
+    offset: int = 0,
+    source: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(RunbookChunk)
+    if source:
+        query = query.filter(RunbookChunk.source == source)
     chunks = (
-        db.query(RunbookChunk)
-        .filter(RunbookChunk.source == "runbooks")
+        query
         .order_by(RunbookChunk.source_document.asc(), RunbookChunk.chunk_index.asc())
         .all()
     )
