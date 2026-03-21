@@ -318,6 +318,405 @@ Environment variable `NEXT_PUBLIC_CHECKOUT_URL` was not injected into the Next.j
 
 ---
 
+### INC-2024-0198 — Static Asset CSS Load Failure from CDN Path Change
+
+**Date:** 2024-05-30
+**Severity:** P1 (Unstyled website, severe user experience impact)
+**Duration:** 58 minutes (detected at +5m via monitoring; not alerted initially)
+
+**Description:**
+A routine deploy updated the Next.js build configuration, which changed the static asset build hash for CSS bundles (from `styles.abc123.css` to `styles.def456.css`). The CDN had a 1-hour TTL on the manifest file (`/_next/static/manifest.json`), which maps asset names to content-hashed filenames. When the new build was deployed, the manifest file was not immediately purged. CDN edge nodes served the old manifest file for ~58 minutes. Browsers requesting the old CSS hash received a 404 from the origin, because the old build artifacts had been replaced. Users saw unstyled pages (FOUC — Flash of Unstyled Content) for the entire duration. The issue resolved after the CDN manifest TTL expired and the fresh manifest was fetched.
+
+**Impact:**
+- ~12,000 page views served without CSS styling (text-only layout)
+- User bounce rate increased by 28% during incident window
+- Checkout completion rate dropped 15% (poor UX caused abandonment)
+- Support team received 220+ complaints about "broken website" styling
+- SEO impact: Google crawler saw unstyled content (negative for rankings)
+
+**Root Cause:**
+The manifest file TTL was set to 1 hour (3600 seconds) to reduce CDN origin requests. However, when the build hash changed, the manifest needed to be invalidated immediately. The deploy process did not include a cache purge step for the manifest file, only for HTML pages. Static asset build hashes are opaque at cache-control time; the manifest is the key to asset discovery.
+
+**Resolution Steps:**
+
+1. **Immediate: Confirm the 404 error and manifest mismatch**
+   ```bash
+   # Check if old CSS is being served (404s)
+   curl -I "https://example.com/_next/static/styles.abc123.css"
+   # Expected: 404 Not Found
+
+   # Verify the manifest is stale
+   curl -s "https://example.com/_next/static/manifest.json" | jq . | head -20
+   # Look for old asset hashes
+
+   # Check current manifest on origin
+   kubectl exec -it deployment/storefront -n ecommerce -- cat /app/.next/static/manifest.json | jq .
+   # Compare with CDN version; should differ
+   ```
+
+2. **Immediate mitigation: Purge the manifest from CDN cache**
+   ```bash
+   # Purge only the manifest file (surgical, not full purge)
+   curl -X POST https://api.cdn.example.com/v3/purge \
+     -H "Authorization: Bearer $CDN_API_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "paths": ["/_next/static/manifest.json"],
+       "purge_type": "selective"
+     }'
+
+   # Verify purge completed
+   curl -s "https://api.cdn.example.com/v3/purge-status/last" \
+     -H "Authorization: Bearer $CDN_API_TOKEN"
+   # Expected: status "complete" within 10 seconds
+   ```
+
+3. **Verify recovery by requesting fresh manifest**
+   ```bash
+   # Request manifest again; should now have fresh asset hashes
+   curl -s "https://example.com/_next/static/manifest.json" | jq . | head -20
+   # Expected: new asset hashes (e.g., styles.def456.css)
+
+   # Verify CSS is now served correctly
+   curl -I "https://example.com/_next/static/styles.def456.css"
+   # Expected: 200 OK (or 304 if cached by browser)
+   ```
+
+4. **Check that styling is restored on the site**
+   ```bash
+   # Use synthetic monitoring to verify CSS loads
+   curl -s "https://api.internal.testing.com/v1/synthetics/run/page-styling-test" \
+     -X POST \
+     -H "Authorization: Bearer $TEST_API_TOKEN"
+   # Expected: CSS loads successfully, page is styled
+   ```
+
+**Follow-up Actions:**
+- **CDN TTL reduction:** Change manifest file TTL from 3600s (1 hour) to 300s (5 minutes). Reduces blast radius on future hash changes.
+- **Automated cache purge:** Add a build-time step that automatically purges `/_next/static/manifest.json` after each deploy. Should be in the deploy script, not manual.
+- **Alert:** Add an alert for "404 rate on static assets >2%" for >5 minutes. Fire to `#incident-storefront`.
+- **Postmortem:** Manifest TTL was too conservative; balance between origin load and freshness needed.
+
+**Incident Report:** Available at [internal-link-to-postmortem]
+
+---
+
+### INC-2024-0523 — Origin Shield Connection Pool Exhaustion from Slow Clients
+
+**Date:** 2024-11-08
+**Severity:** P1 (Storefront TTFB spike, high latency, potential availability impact)
+**Duration:** 23 minutes (detected by monitoring; manual mitigation)
+
+**Description:**
+The CDN edge nodes maintain a connection pool to the origin shield to reduce connection overhead. The origin shield was configured with a 256-connection pool. A large number of slow clients connected to the CDN (possibly from a specific geography or ISP), and their requests to the storefront were completing very slowly. Some requests took >60 seconds to complete (likely due to slow network links or slow client processing). The CDN edge nodes maintained persistent connections for these slow requests. Meanwhile, additional browser requests from other users arrived and needed new connections to the origin shield. The origin shield connection pool became exhausted; all 256 slots were occupied by slow, incomplete requests. New, fast requests queued behind slow requests, causing TTFB to spike to 12+ seconds. The situation self-resolved after ~23 minutes as slow clients timed out or completed.
+
+**Impact:**
+- Storefront P99 TTFB spiked from ~200ms to 12 seconds
+- Origin shield connection exhaustion: 256/256 pool slots in use
+- New requests queued for 8–12 seconds before even reaching the origin
+- ~3,200 customer sessions affected, with page load times >10s
+- Estimated 22% conversion rate dip during incident
+- Customer complaints about "slow website" (240+ support tickets)
+
+**Root Cause:**
+The origin shield connection pool was too small (256) relative to the potential concurrent slow requests. There was no timeout on incomplete requests at the connection level. Slow clients could hold connections open indefinitely (slowloris-style attack vector, or just legitimate slow networks). The pool did not have automatic connection eviction for idle/slow connections.
+
+**Resolution Steps:**
+
+1. **Immediate: Confirm the connection pool exhaustion**
+   ```bash
+   # Check origin shield connection stats
+   curl -s "https://api.internal.observability.com/v1/metrics?query=origin_shield_active_connections&duration=30m" \
+     -H "Authorization: Bearer $OBS_API_TOKEN"
+   # Expected: spike to 256/256 (pool exhaustion) during incident window
+
+   # Check TTFB spike
+   curl -s "https://api.internal.observability.com/v1/metrics?query=storefront_ttfb_p99&duration=30m" \
+     -H "Authorization: Bearer $OBS_API_TOKEN"
+   # Expected: spike from ~200ms to 12000ms+ at incident start
+   ```
+
+2. **Increase the origin shield connection pool**
+   ```bash
+   # Update CDN origin shield config (via API or dashboard)
+   curl -X PATCH https://api.cdn.example.com/v3/origins/shield \
+     -H "Authorization: Bearer $CDN_API_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "connection_pool_size": 512,
+       "connection_timeout_seconds": 30
+     }'
+
+   # Verify change applied
+   curl -s https://api.cdn.example.com/v3/origins/shield \
+     -H "Authorization: Bearer $CDN_API_TOKEN" | jq '.connection_pool_size'
+   # Expected: 512
+   ```
+
+3. **Add connection timeout to evict stuck connections**
+   ```bash
+   # Update timeout policy (via CDN provider interface)
+   # Timeout should be 30 seconds (allow legitimate slow uploads/downloads, but evict truly stuck connections)
+   curl -X PATCH https://api.cdn.example.com/v3/origins/shield \
+     -H "Authorization: Bearer $CDN_API_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "idle_connection_timeout_seconds": 30,
+       "request_timeout_seconds": 30
+     }'
+   ```
+
+4. **Verify recovery**
+   ```bash
+   # Wait 5 minutes and re-check connection pool
+   curl -s "https://api.internal.observability.com/v1/metrics?query=origin_shield_active_connections&duration=10m" \
+     -H "Authorization: Bearer $OBS_API_TOKEN"
+   # Expected: drop to normal levels (<50 concurrent)
+
+   # Verify TTFB recovery
+   curl -s "https://api.internal.observability.com/v1/metrics?query=storefront_ttfb_p99&duration=10m" \
+     -H "Authorization: Bearer $OBS_API_TOKEN"
+   # Expected: return to ~200ms
+   ```
+
+**Follow-up Actions:**
+- **Connection pool tuning:** Increase origin shield pool from 256 to 512 (applied above). Re-evaluate after 2 weeks of traffic.
+- **Connection timeout:** Add 30-second idle timeout and request timeout (applied above).
+- **Monitoring:** Add alerts:
+  - "Origin shield connection pool >80% utilization" (fire if >204 concurrent for >2 minutes)
+  - "Storefront TTFB P99 >5s" (early warning before pool exhaustion)
+- **Slow client mitigation:** Consider rate-limiting or filtering requests from slow client IPs in CDN config.
+- **Postmortem:** Pool size was under-provisioned; customer base includes slow/high-latency networks.
+
+**Incident Report:** Available at [internal-link-to-postmortem]
+
+---
+
+### INC-2025-0066 — Next.js Hot Module Reload Regression Causing Hydration Errors
+
+**Date:** 2025-02-14
+**Severity:** P2 (Partial user sessions affected, browser errors, degraded UX)
+**Duration:** 15 minutes (detected at +3m via error monitoring; resolved by rollback)
+
+**Description:**
+A deploy updated Next.js from version 14.0 to 14.1. The deploy process was intended to pick up bug fixes and performance improvements in the minor version bump. However, the production build included development-only HMR (hot module reload) code. Next.js HMR is designed for development environments to auto-refresh when code changes; it should never be included in production builds. A misconfiguration in the build process included HMR logic in the production bundle. When browsers loaded the page, the HMR client-side code tried to connect to a development WebSocket server that did not exist in production. The HMR handshake failed, and the page hydration (matching server-rendered HTML with client-side React components) never completed. This resulted in a white screen or broken interactivity for ~30% of sessions. The remaining 70% of sessions loaded successfully (likely due to cache variance or timing).
+
+**Impact:**
+- ~8,000 sessions experienced white screen / hydration errors
+- Affected users: 30% of concurrent sessions over 15 minutes
+- Checkout page hydration failure: checkout flow broken for affected users
+- Error rate spike: 18% of requests returned hydration errors
+- Support team received 340+ complaints about "broken website"
+- Estimated loss: $12–15k in abandoned transactions
+
+**Root Cause:**
+The Next.js upgrade from 14.0 to 14.1 changed the build configuration defaults. The `swcMinify` option behavior changed slightly, and a new option `experimental.optimizePackageImports` was added. During the upgrade, the build configuration was not carefully reviewed. The development-mode HMR client code was inadvertently bundled in the production build due to a config flag not being set correctly. The issue only manifested in production because the production build is optimized differently than development builds.
+
+**Resolution Steps:**
+
+1. **Immediate: Confirm hydration errors in production**
+   ```bash
+   # Check browser error logs for hydration failures
+   curl -s "https://api.internal.observability.com/v1/metrics?query=browser_hydration_errors&duration=30m" \
+     -H "Authorization: Bearer $OBS_API_TOKEN"
+   # Expected: spike in hydration error count starting at deploy time
+
+   # Check storefront pod logs for React/Next.js warnings
+   kubectl logs -l app=storefront -n ecommerce --tail=100 | grep -i "hydration\|HMR\|mismatch"
+   # Expected: warnings about hydration mismatch
+   ```
+
+2. **Immediate mitigation: Rollback to Next.js 14.0**
+   ```bash
+   # Undo the previous deployment
+   kubectl rollout undo deployment/storefront -n ecommerce
+
+   # Verify rollout status
+   kubectl rollout status deployment/storefront -n ecommerce --timeout=2m
+   # Expected: deployment rolled out within 90 seconds
+   ```
+
+3. **Verify hydration errors cleared**
+   ```bash
+   # Re-check browser error metrics
+   curl -s "https://api.internal.observability.com/v1/metrics?query=browser_hydration_errors&duration=10m" \
+     -H "Authorization: Bearer $OBS_API_TOKEN"
+   # Expected: drop to baseline <0.5%
+
+   # Run synthetic test on checkout flow
+   curl -s "https://api.internal.testing.com/v1/synthetics/run/checkout-flow-test" \
+     -X POST \
+     -H "Authorization: Bearer $TEST_API_TOKEN"
+   # Expected: test passes without hydration errors
+   ```
+
+4. **Investigate the build configuration before re-attempting upgrade**
+   ```bash
+   # Check the Next.js config file
+   cat frontend/next.config.js
+
+   # Compare with Next.js 14.1 migration guide
+   # Verify all required options are set correctly
+
+   # Check package.json for Next.js version pin
+   cat frontend/package.json | grep "next"
+   ```
+
+**Follow-up Actions:**
+- **Next.js upgrade validation:** Before upgrading Next.js, carefully review the changelog and migration guide. Test the production build locally to verify HMR is not included.
+- **Build config validation:** Add a build-time check that fails if the production bundle includes HMR code. Can check the bundle size or scan for HMR imports.
+- **Pre-deploy test:** Add synthetic test for hydration errors that runs post-deploy (before traffic redirect). Fail if any hydration errors are detected.
+- **Monitoring:** Add alert: "Browser hydration errors >1% for >2 minutes" → fire to `#incident-storefront`.
+- **Postmortem:** Minor version upgrades should be treated as major changes; thorough testing required.
+
+**Incident Report:** Available at [internal-link-to-postmortem]
+
+---
+
+### INC-2024-0301 — Image Service Timeout Cascading to Origin Slowdown
+
+**Date:** 2024-10-05
+**Severity:** P1 (Images broken, origin overload, storefront slowdown)
+**Duration:** 19 minutes (detected at +4m via monitoring alerts; resolved by timeout reduction)
+
+**Description:**
+The image-service handles on-demand image resizing and optimization. It has an HTTP client that makes upstream requests to the image provider (hosted on a separate, slower server). The image-service was configured with a 30-second HTTP request timeout to the upstream image provider. During a peak traffic period, the upstream image provider experienced latency spikes (>15 seconds per request). Image-service requests hit the 30-second timeout, but not immediately; they took 15 seconds to fail. Meanwhile, the storefront made image requests to image-service, and image-service held those connections open while waiting for upstream responses. The Kubernetes connection pool on the storefront → image-service link became saturated with slow requests. The origin shield → storefront connection pool also became saturated as the storefront itself was blocked waiting for images. This cascaded to the entire storefront being slow. Image requests that did complete returned 503 Service Unavailable. After 19 minutes, the upstream image provider recovered, request latency normalized, and the cascade resolved.
+
+**Impact:**
+- Image-service error rate: 45% (503 Service Unavailable timeouts)
+- Storefront P99 latency spike: from ~200ms to 8 seconds
+- Images broken on ~85% of product pages (missing or 503 errors)
+- Storefront request queue backed up: 3,200+ pending requests
+- Estimated conversion impact: 18% dip
+- Support escalations: 280+ tickets about "missing product images"
+
+**Root Cause:**
+The image-service HTTP timeout was set to 30 seconds, which was intended to be conservative. However, the timeout was too long for the storefront's connection pool, which could only hold ~200 pending requests. The upstream image provider's 15-second latency spike meant each image request held a slot for 15 seconds, and new requests queued. Additionally, there was no circuit breaker or fallback mechanism; timeout errors were returned immediately without any caching of previously-resized images.
+
+**Resolution Steps:**
+
+1. **Immediate: Confirm the upstream latency spike**
+   ```bash
+   # Check image-service request latency to upstream
+   curl -s "https://api.internal.observability.com/v1/metrics?query=image_service_upstream_latency_p99&duration=30m" \
+     -H "Authorization: Bearer $OBS_API_TOKEN"
+   # Expected: spike to 15000ms+ during incident
+
+   # Check upstream image provider status
+   curl -s "https://upstream-image-provider.example.com/health"
+   # Expected: responds, but with high latency
+   ```
+
+2. **Reduce the image-service HTTP timeout from 30s to 5s**
+   ```bash
+   # Update image-service deployment with new timeout
+   kubectl set env deployment/image-service -n ecommerce \
+     UPSTREAM_REQUEST_TIMEOUT_SECONDS=5
+
+   # Verify the change
+   kubectl get deployment image-service -n ecommerce -o yaml | grep "UPSTREAM_REQUEST_TIMEOUT"
+   # Expected: should show 5
+   ```
+
+3. **Add circuit breaker and fallback logic**
+   ```bash
+   # Apply updated image-service config with fallback
+   kubectl apply -f - <<EOF
+   apiVersion: v1
+   kind: ConfigMap
+   metadata:
+     name: image-service-config
+     namespace: ecommerce
+   data:
+     UPSTREAM_REQUEST_TIMEOUT_SECONDS: "5"
+     CIRCUIT_BREAKER_ENABLED: "true"
+     CIRCUIT_BREAKER_FAILURE_THRESHOLD: "50"
+     FALLBACK_IMAGE_URL: "https://cdn.example.com/placeholder-image.png"
+   EOF
+
+   # Restart image-service pods to apply config
+   kubectl rollout restart deployment/image-service -n ecommerce
+   kubectl rollout status deployment/image-service -n ecommerce --timeout=2m
+   ```
+
+4. **Verify recovery**
+   ```bash
+   # Check image-service latency
+   curl -s "https://api.internal.observability.com/v1/metrics?query=image_service_latency_p99&duration=10m" \
+     -H "Authorization: Bearer $OBS_API_TOKEN"
+   # Expected: should drop to <1000ms as short-timeout failures fail faster
+
+   # Check storefront P99 latency
+   curl -s "https://api.internal.observability.com/v1/metrics?query=storefront_ttfb_p99&duration=10m" \
+     -H "Authorization: Bearer $OBS_API_TOKEN"
+   # Expected: return to ~200ms
+
+   # Check that images are being served (fallback or real)
+   curl -I "https://example.com/product/image/123"
+   # Expected: 200 OK (even if fallback image)
+   ```
+
+**Follow-up Actions:**
+- **Timeout reduction:** Reduce image-service upstream timeout from 30s to 5s (applied above). Fail faster, unblock connection pool sooner.
+- **Circuit breaker:** Implement circuit breaker pattern in image-service. If upstream latency >5s for >50 consecutive requests, serve fallback image instead of timing out.
+- **Fallback caching:** Cache previously-resized images with a 1-hour TTL. If upstream is down, serve cached version instead of fallback.
+- **Pool sizing:** Increase image-service connection pool from 200 to 400 to provide more buffer.
+- **Monitoring:** Add alerts:
+  - "Image-service error rate >10%" (fire if true for >2 minutes)
+  - "Image-service upstream latency >5s P99" (early warning)
+- **Postmortem:** Timeout was too conservative; circuit breaker pattern needed for cascading failures.
+
+**Incident Report:** Available at [internal-link-to-postmortem]
+
+---
+
+## Inter-Service Impact Map
+
+When CDN & Storefront degrades, the cascade looks like:
+
+| Stage | Service | Impact | Time to Detect |
+|---|---|---|---|
+| Immediate | storefront | TTFB >800ms, pages slow to load | <1 min |
+| +2 min | image-service | images broken or timeout, 404 errors | +2 min |
+| +5 min | api-gateway | requests queue behind slow storefront connections, backend latency rises | +5 min |
+| +10 min | checkout-service | checkout page load stalls, abandonment increases | +10 min |
+
+**How to read this:** If storefront is down/slow for N minutes, expect downstream impacts.
+
+**Isolation actions:** Enable image service circuit breaker: if image latency >5s, serve placeholder image. CDN fallback: if origin shield unreachable, serve cached version even if stale (better than 500 error).
+
+---
+
+## Rollback Decision Tree
+
+**When to rollback vs. hotfix:**
+
+1. Storefront TTFB >800ms P99 for >2 minutes?
+   - YES → If from recent deploy, rollback immediately
+   - NO → Proceed to step 2
+
+2. Images broken (404s) or all returning errors?
+   - YES → If image-service deploy recent, rollback. If CDN config, hotfix.
+   - NO → Proceed to step 3
+
+3. Cache hit rate <50%?
+   - YES → If cache bypass misconfiguration, hotfix. If code issue, rollback.
+   - NO → Wait and monitor
+
+**Quick rollback command:**
+```bash
+kubectl rollout undo deployment/storefront -n ecommerce
+kubectl rollout status deployment/storefront -n ecommerce --timeout=3m
+```
+
+**Verification after rollback:**
+- Storefront TTFB <800ms P99
+- Image delivery P95 <300ms
+- Cache hit rate >85%
+- No increase in browser errors (via synthetic monitoring)
+
+---
+
 ## Failure Mode Catalog
 
 ### 1. CDN Cache Stampede on Origin
