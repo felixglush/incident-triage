@@ -178,6 +178,244 @@ psql $DATABASE_URL -c "EXPLAIN SELECT COUNT(*) FROM orders WHERE created_at > no
 
 ---
 
+### INC-2024-0176 — PostgreSQL Autovacuum Bloat Causing Full Table Scan Slowdown
+
+**Date:** 2024-06-22 | **Severity:** P1
+
+**Description:**
+At 14:45 UTC, the Data Pipelines team disabled PostgreSQL autovacuum on the primary to accelerate a bulk import of 45M product records (non-critical catalog update). The team planned to re-enable autovacuum after the import completed. However, the runbook they followed was outdated — it did not include a step to re-enable autovacuum. For 3 days, autovacuum remained disabled. Dead tuples (deleted/updated rows) accumulated on the `products` table (890M rows). By 2024-06-25, the table had 67% bloat (590M dead tuples). Queries against the table began performing full sequential scans and taking 45 seconds. The alert `db.query_p99_ms > 1000` fired. The inventory-read service timed out queries, returning HTTP 503 errors for a partial product catalog.
+
+**Impact:**
+- Inventory API P99 latency: 45s (normal: <200ms)
+- Inventory API error rate: 12% (timeout errors) for 4 hours
+- ~500 failed product searches during that window
+- Merchant dashboard "Products" page loading failed with 503
+
+**Root Cause:**
+Autovacuum was disabled without a time-bound re-enable step in the runbook. The import took 8 hours; the team forgot to re-enable autovacuum afterward. Dead tuple bloat accumulated over 3 days, degrading query performance on the heavily-accessed `products` table.
+
+**Resolution:**
+```bash
+# 1. Check bloat percentage on the products table
+psql $DATABASE_URL -c "
+  SELECT schemaname, tablename,
+    ROUND(100 - (CASE WHEN otta=0 OR sml.relpages = 0 OR sml.relpages = otta
+      THEN 100.0 ELSE GREATEST(0, LEAST(100, (sml.relpages - otta) * 100.0 / sml.relpages)) END)::numeric, 2) AS bloat_ratio
+  FROM pg_class
+  JOIN pg_namespace ON pg_class.relnamespace = pg_namespace.oid
+  LEFT JOIN pg_stat_user_tables sml ON pg_class.oid = sml.relid
+  WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+    AND tablename = 'products';"
+
+# 2. Verify autovacuum is disabled
+psql $DATABASE_URL -c "SELECT name, setting FROM pg_settings WHERE name = 'autovacuum';"
+
+# 3. Re-enable autovacuum immediately
+psql $DATABASE_URL -c "ALTER SYSTEM SET autovacuum = on;"
+# Reload config
+psql $DATABASE_URL -c "SELECT pg_reload_conf();"
+
+# 4. Run manual VACUUM on the bloated table (blocks writes temporarily)
+psql $DATABASE_URL -c "VACUUM ANALYZE products;"
+# For a 890M-row table with 67% bloat, expect 8–15 minutes
+
+# 5. Monitor VACUUM progress
+watch -n 10 'psql $DATABASE_URL -c "SELECT pid, phase, heap_blks_total, heap_blks_scanned FROM pg_stat_progress_vacuum WHERE relid = '\''products'\''::regclass;"'
+
+# 6. After VACUUM completes, verify bloat is reduced and query P99 recovers
+psql $DATABASE_URL -c "EXPLAIN (ANALYZE, BUFFERS) SELECT COUNT(*) FROM products WHERE category_id = 1;"
+```
+
+**Follow-up Actions:**
+- Updated autovacuum runbook to require explicit re-enable step with a reminder (PR #3921)
+- Set up automated alert for autovacuum being disabled for >2 hours
+- Added `autovacuum = on` as a baseline config in `init_db.py` schema setup
+- Pinned minimum autovacuum frequency on large tables: `autovacuum_naptime = 10s` for tables >100M rows
+
+---
+
+### INC-2025-0037 — Redis Persistence Disk Full Causing RDB Write Failure
+
+**Date:** 2025-02-12 | **Severity:** P1
+
+**Description:**
+At 03:17 UTC, Redis persistence (RDB snapshot) on the primary node began a scheduled save. The `/var/lib/redis` partition on the backing storage had 2GB free space (out of 500GB total). The RDB file size was 1.8GB. The snapshot write succeeded but consumed 1.7GB, leaving only 300MB free. At 03:19, the next RDB snapshot cycle was triggered (configured for every 3,600 seconds or on 1000 key changes — the second threshold was hit). Redis attempted to write a new RDB snapshot but failed with `ENOSPC` (no space). Redis then threw an error and stopped accepting new write commands (SET, HSET, LPUSH, etc.). All cache write operations failed for 8 minutes until the incident was resolved. Read operations (GET, HGET) continued working, causing severe cache staleness.
+
+**Impact:**
+- Cache write failures for 8 minutes (03:19–03:27 UTC)
+- Session updates failed (user auth tokens could not be refreshed)
+- ~200 users forcibly logged out after 30 minutes of inactivity (session refresh failed)
+- Price updates and inventory adjustments queued but not persisted
+- All cache-write-dependent services returned 5xx errors
+
+**Root Cause:**
+Redis persistence disk was sized for steady-state RDB size (1.6GB) with only ~500MB headroom. No monitoring existed on `/var/lib/redis` free space. During a traffic spike, keyspace grew to 1.8GB. The next RDB snapshot attempt failed because free space was insufficient for a atomic write + rotate.
+
+**Resolution:**
+```bash
+# 1. Confirm Redis is still running but rejecting writes
+redis-cli PING
+# Should return PONG
+redis-cli SET test_key test_value 2>&1 | head -20
+# Should show error: OOM command not allowed when used memory > maxmemory
+
+# 2. Check Redis disk space
+df -h /var/lib/redis
+# Should show <500MB free (in this case 300MB)
+
+# 3. Expand the `/var/lib/redis` partition (or migrate to larger storage)
+# If using cloud storage snapshots:
+kubectl scale statefulset redis --replicas=0 -n cache
+# Wait for pod to terminate
+# Expand the PVC to 1000GB (or as needed)
+kubectl patch pvc redis-data -n cache -p '{"spec":{"resources":{"requests":{"storage":"1000Gi"}}}}'
+kubectl scale statefulset redis --replicas=1 -n cache
+# Wait for pod to be ready
+
+# 4. Stop ongoing RDB snapshot writes
+redis-cli BGSAVE
+# If this hangs, the write is in progress. Wait or kill the background process.
+
+# 5. Once space is freed and pod is healthy, force an RDB save
+redis-cli BGSAVE
+# Monitor progress
+watch -n 5 'redis-cli LASTSAVE && redis-cli INFO persistence | grep -E "rdb_last_save_time|rdb_last_bgsave_status"'
+
+# 6. Re-enable writes
+redis-cli CONFIG SET stop-writes-on-bgsave-error no
+# (Or restart Redis to reset to default)
+```
+
+**Follow-up Actions:**
+- Increased `/var/lib/redis` partition from 500GB to 1000GB
+- Added monitoring alert for `/var/lib/redis` free space <1GB (trigger page)
+- Set `save ""` (disable RDB snapshots) and rely on AOF (append-only file) persistence instead
+- Configured AOF rewrite threshold to trigger when AOF file exceeds 500MB
+- Added runbook: "Redis RDB Expansion" documenting PVC resizing procedure
+
+---
+
+### INC-2024-0345 — Connection Leak in Third-Party ORM Library
+
+**Date:** 2024-10-15 | **Severity:** P1
+
+**Description:**
+At 09:30 UTC, a new version of a third-party Python ORM library was deployed as a dependency update. The library had a known internal bug that leaked database connections under specific query patterns. The product team's new "Smart Recommendations" feature, deployed in the same release window, happened to use exactly the triggering query pattern: `ORM.filter(status='active').join(orders).filter(amount > 500).select()`. This query, executed ~50 times per second during checkout, triggered the connection leak. Each query leaked 1 connection back to the pool without properly closing it. After 4 hours (approximately 720,000 leaked connections * 1 connection leak per 50 queries = ~14,400 leaked connections accumulated), the PgBouncer connection pool (max 500 connections) became exhausted. All new database connections were rejected.
+
+**Impact:**
+- PgBouncer connection pool exhausted at 13:30 UTC
+- All new API requests failed with "connection pool exhausted"
+- API error rate: 100% for 45 minutes
+- Checkout service completely down
+- ~8,500 failed checkout attempts
+- ~$2.1M GMV impact
+
+**Root Cause:**
+A third-party ORM library was updated to a version with a connection leak bug. The bug was triggered by a specific query pattern (join + filter + select) introduced in the same deploy. No connection leak testing was performed before deploying the library update.
+
+**Resolution:**
+```bash
+# 1. Identify connection leak pattern in application logs
+grep -i "connection leak\|pool exhausted" /var/log/app.log | tail -50
+# Or check active connections by application:
+psql $DATABASE_URL -c "
+  SELECT application_name, COUNT(*)
+  FROM pg_stat_activity
+  GROUP BY application_name
+  ORDER BY count DESC;"
+
+# 2. Identify the problematic ORM library version
+pip freeze | grep -i orm-library-name
+
+# 3. Kill all idle connections to immediately restore some capacity
+psql $DATABASE_URL -c "
+  SELECT pg_terminate_backend(pid)
+  FROM pg_stat_activity
+  WHERE state = 'idle'
+    AND state_change < now() - interval '1 minute'
+    AND pid != pg_backend_pid();"
+
+# 4. Downgrade the ORM library to the previous known-good version
+pip install orm-library-name==2.3.1  # Previous version without the leak
+# Rebuild application image and redeploy
+kubectl rollout restart deployment/checkout-service -n ecommerce
+
+# 5. Monitor connection count recovery
+watch -n 10 'psql $DATABASE_URL -c "SELECT COUNT(*) FROM pg_stat_activity;"'
+# Should drop back to <200 as old pods terminate and new pods start
+
+# 6. Verify error rate returns to baseline
+watch -n 10 'kubectl logs -l app=checkout-service -n ecommerce --tail=100 | grep -E "5[0-9]{2}|error" | wc -l'
+```
+
+**Follow-up Actions:**
+- Downgraded ORM library to 2.3.1 (PR #4156)
+- Added pre-deployment check: run 1000-request load test against new library versions before merging
+- Added Sentry error tracking for "connection pool exhausted" alerts with severity P0
+- Configured PgBouncer `client_idle_timeout = 600` to auto-close idle client connections after 10 minutes
+
+---
+
+### INC-2024-0511 — PgBouncer Version Incompatibility Causing Authentication Failures
+
+**Date:** 2024-11-30 | **Severity:** P1
+
+**Description:**
+At 22:15 UTC, the infrastructure team upgraded PgBouncer from version 1.15 to 1.16 as a routine maintenance task (no major security fixes noted, just "improvements"). The upgrade was rolled out to the prod cluster without testing. PgBouncer 1.16 introduced a subtle bug in the PostgreSQL authentication protocol handler: under high connection load, approximately 10% of new connection attempts were randomly rejected with "auth failed" error, even though credentials were correct. The error was not deterministic — retrying the connection usually succeeded on the second attempt. This caused request latency spikes and intermittent 5xx errors across all API services.
+
+**Impact:**
+- ~10% of new connection attempts failed with "auth failed" (non-deterministic)
+- API P99 latency spiked from 200ms to 4s (due to connection retry logic)
+- API error rate: 3–5% across all services (503 errors from timeout retries)
+- Incident duration: 2 hours (22:15–00:15 UTC)
+- User-facing impact: slow page loads, checkout timeouts
+
+**Root Cause:**
+PgBouncer 1.16 had an authentication protocol bug that manifested under high load. The bug was not caught in the release notes or security advisories. No canary or staging test was performed before the prod rollout.
+
+**Resolution:**
+```bash
+# 1. Confirm PgBouncer version and auth errors in logs
+kubectl exec -it deployment/pgbouncer-0 -n ecommerce -- pgbouncer --version
+# Output: pgbouncer 1.16
+
+# Check logs for auth failures
+kubectl logs deployment/pgbouncer -n ecommerce | grep -i "auth" | tail -50
+
+# 2. Downgrade PgBouncer to the previous stable version
+# Update the deployment image tag in the Helm values or Dockerfile:
+# Change: pgbouncer:1.16 → pgbouncer:1.15.2-debian
+# Then redeploy:
+helm upgrade pgbouncer ./helm/pgbouncer -f helm/values.yaml \
+  --set pgbouncer.image.tag=1.15.2-debian -n ecommerce
+
+# Wait for rollout to complete
+kubectl rollout status deployment/pgbouncer -n ecommerce
+
+# 3. Verify auth errors have ceased
+watch -n 5 'kubectl logs deployment/pgbouncer -n ecommerce --tail=50 | grep -i "auth" | wc -l'
+# Should drop to zero or near-zero
+
+# 4. Monitor API error rate recovery
+watch -n 10 'kubectl logs -l app=catalog-api -n ecommerce --tail=100 | grep -E "5[0-9]{2}" | wc -l'
+# Should return to baseline (<1% error rate)
+
+# 5. Verify connection pool health
+psql $DATABASE_URL -c "
+  SELECT client_addr, state, COUNT(*)
+  FROM pg_stat_activity
+  GROUP BY client_addr, state
+  ORDER BY count DESC;"
+```
+
+**Follow-up Actions:**
+- Downgraded PgBouncer to 1.15.2 (Pin in Helm values)
+- Added pre-deployment testing: all infrastructure component upgrades must be tested in staging for 24 hours before prod rollout
+- Disabled auto-upgrade of PgBouncer; now requires explicit approval
+- Added monitoring alert for "auth failed" errors from PgBouncer (threshold: >10 in 5 minutes)
+
+---
+
 ## Failure Mode Catalog
 
 ### Connection Pool Exhaustion (PgBouncer Saturation)
@@ -569,3 +807,51 @@ Failover status: [not started / in progress / complete]
 Next update: [HH:MM UTC]
 ```
 Post this template as the first message in `#incidents` at incident declaration. Update it in-thread every 5 minutes. Pin the thread at incident start and unpin at resolution.
+
+---
+
+## Inter-Service Impact Map
+
+When Database & Cache degrades, the cascade looks like:
+
+| Stage | Service | Impact | Time to Detect |
+|---|---|---|---|
+| Immediate | DB/Redis | reads slow or fail, cache misses storm | <1 min |
+| +2 min | all API services | handlers block waiting for DB, request timeouts | +2 min |
+| +5 min | api-gateway | connection pool saturated, new requests queued | +5 min |
+| +10 min | checkout-service | checkout P99 >10s, error rate spikes | +10 min |
+
+**How to read this:** DB/cache degradation is the root of almost all cascades. It's foundational.
+
+**Isolation actions:** DB circuit breaker: after 3 consecutive query timeouts, return cached data (even if stale). Scale read replicas. Disable non-critical writes (analytics, reporting).
+
+---
+
+## Rollback Decision Tree
+
+**When to rollback vs. hotfix:**
+
+1. **DB connection pool >80% for >2 minutes?**
+   - **YES** → Kill idle connections first. If persists, scale read replicas. Rollback only if recent deploy introduced connection leak.
+   - **NO** → Proceed to step 2
+
+2. **Query P99 >500ms sustained?**
+   - **YES** → If from recent deploy, rollback. If data volume issue, hotfix (e.g., add index).
+   - **NO** → Proceed to step 3
+
+3. **Replication lag >30 seconds?**
+   - **YES** → Check for long-running queries on replica. Kill if necessary. Escalate if primary is down.
+   - **NO** → Wait and monitor
+
+**Quick rollback command:**
+```bash
+kubectl rollout undo deployment/api-service -n ecommerce
+# If connection pool issue, also kill idle connections:
+psql $DATABASE_URL -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle' AND state_change < now() - interval '1 minute';"
+```
+
+**Verification after rollback:**
+- Connection pool usage <50%
+- Query P99 <200ms
+- Replication lag <500ms
+- No new connection errors in logs
