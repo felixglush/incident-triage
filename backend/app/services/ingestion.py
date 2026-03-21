@@ -233,7 +233,7 @@ def upsert_markdown_document(
     tags = list(tags or [])
     extra_metadata = dict(extra_metadata or {})
     version_hash = compute_hash(content)
-    chunks = chunk_markdown(content)
+    chunks = chunk_markdown_structured(content)
     document_title = extra_metadata.get("title")
     if not document_title and chunks:
         document_title = chunks[0].title
@@ -308,13 +308,15 @@ def upsert_markdown_document(
             "title": chunk.title,
             **extra_metadata,
         }
-        search_text = f"{chunk.title or ''} {chunk.content}".strip()
+        search_text = " ".join(filter(None, [chunk.section_header, chunk.title, chunk.content])).strip()
         db.add(
             RunbookChunk(
                 source_document=source_document,
                 chunk_index=chunk.chunk_index,
                 title=chunk.title,
                 content=chunk.content,
+                section_header=chunk.section_header,      # NEW
+                section_content=chunk.section_content,    # NEW
                 search_tsv=func.to_tsvector("english", search_text),
                 embedding=embed_text(chunk.content),
                 doc_metadata=metadata,
