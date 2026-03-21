@@ -106,10 +106,13 @@ def _split_section(text: str, max_chars: int, overlap: int) -> List[str]:
     if current.strip():
         sub_chunks.append(current.strip())
 
-    # Apply within-section overlap only
+    # Apply within-section overlap only. Snapshot originals first to prevent
+    # cascade: each chunk's overlap prefix must come from the prior chunk's
+    # original content, not from its already-prepended overlap text.
     if overlap > 0 and len(sub_chunks) > 1:
+        originals = list(sub_chunks)
         for i in range(1, len(sub_chunks)):
-            overlap_text = sub_chunks[i - 1][-overlap:]
+            overlap_text = originals[i - 1][-overlap:]
             sub_chunks[i] = f"{overlap_text}\n{sub_chunks[i]}"
 
     return sub_chunks if sub_chunks else [text.strip()]
