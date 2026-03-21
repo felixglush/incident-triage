@@ -386,6 +386,9 @@ class RunbookChunk(Base):
 
     # Content
     title = Column(String(500))
+    # Parent section for small-to-big retrieval
+    section_header = Column(String(500))          # H2/H3 header text, e.g. "INC-2024-0156 — Redis OOM"
+    section_content = Column(Text)                # Full parent section text shared across child chunks
     content = Column(Text, nullable=False)
     search_tsv = Column(TSVECTOR)
 
