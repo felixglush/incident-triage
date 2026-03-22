@@ -32,9 +32,7 @@ def patch_embed_text(request):
     if "no_embed_patch" in request.keywords:
         yield
         return
-    # NOTE: Using 384 dims to match the current DB schema (Vector(384)).
-    # Task 6 will bump this to 1024 alongside the schema migration.
-    fake_vec = [0.1] * 384
+    fake_vec = [0.1] * 1024
 
     def _fake_embed_texts(texts, mode="document"):
         return [fake_vec for _ in texts]

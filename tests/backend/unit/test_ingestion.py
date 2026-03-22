@@ -212,7 +212,7 @@ def test_upsert_calls_embed_texts_once_per_document(db_session):
     def counting_embed_texts(texts, mode="document"):
         nonlocal call_count
         call_count += 1
-        return [[0.1] * 384 for _ in texts]
+        return [[0.1] * 1024 for _ in texts]
 
     with patch.object(ing_module, "embed_texts", counting_embed_texts):
         upsert_markdown_document(

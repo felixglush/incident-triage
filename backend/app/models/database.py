@@ -224,7 +224,7 @@ class Incident(Base):
 
     # Embedding for similarity search
     if HAS_PGVECTOR:
-        incident_embedding = Column(Vector(384))
+        incident_embedding = Column(Vector(1024))
     else:
         incident_embedding = Column(JSONB)
 
@@ -393,9 +393,9 @@ class RunbookChunk(Base):
     search_tsv = Column(TSVECTOR)
 
     # Vector embedding for similarity search
-    # Using 384 dimensions for all-MiniLM-L6-v2 model
+    # Using 1024 dimensions for Qwen3-Embedding-0.6B model
     if HAS_PGVECTOR:
-        embedding = Column(Vector(384))
+        embedding = Column(Vector(1024))
     else:
         embedding = Column(JSONB)  # Fallback to JSONB
 
