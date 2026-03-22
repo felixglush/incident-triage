@@ -33,7 +33,7 @@ class TestRagRetrieval:
         db_session.commit()
 
         query = "connection pool exhausted"
-        results = find_similar_runbook_chunks(db_session, embed_text(query), query, limit=1)
+        results = find_similar_runbook_chunks(db_session, embed_text(query, mode="query"), query, limit=1)
         assert results
         assert "Database Connection Pool" in results[0]["chunk"].title
 
@@ -63,7 +63,7 @@ class TestRagRetrieval:
         db_session.commit()
 
         query = "queue backlog"
-        results = find_similar_runbook_chunks(db_session, embed_text(query), query, limit=5)
+        results = find_similar_runbook_chunks(db_session, embed_text(query, mode="query"), query, limit=5)
         assert all(item["chunk"].source == "runbooks" for item in results)
 
     def test_rerank_boosts_title_match(self, db_session):
@@ -93,7 +93,7 @@ class TestRagRetrieval:
         db_session.commit()
 
         query = "pool"
-        results = find_similar_runbook_chunks(db_session, embed_text(query), query, limit=2)
+        results = find_similar_runbook_chunks(db_session, embed_text(query, mode="query"), query, limit=2)
         assert results
         assert results[0]["chunk"].title == "Pooling instructions"
 
@@ -112,5 +112,5 @@ class TestRagRetrieval:
         db_session.commit()
 
         query = "the and of"
-        results = find_similar_runbook_chunks(db_session, embed_text(query), query, limit=5)
+        results = find_similar_runbook_chunks(db_session, embed_text(query, mode="query"), query, limit=5)
         assert results == []

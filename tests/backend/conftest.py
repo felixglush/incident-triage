@@ -40,7 +40,10 @@ def patch_embed_text(request):
     with patch("app.services.embeddings.embed_texts", side_effect=_fake_embed_texts) as _mock, \
          patch("app.services.embeddings.embed_text", return_value=fake_vec), \
          patch("app.services.ingestion.embed_texts", side_effect=_fake_embed_texts), \
-         patch("app.services.incident_similarity.embed_texts", side_effect=_fake_embed_texts):
+         patch("app.services.incident_similarity.embed_texts", side_effect=_fake_embed_texts), \
+         patch("app.services.incident_similarity.embed_text", return_value=fake_vec), \
+         patch("app.services.incident_summaries.embed_text", return_value=fake_vec), \
+         patch("app.api.runbooks.embed_text", return_value=fake_vec):
         yield _mock
 
 

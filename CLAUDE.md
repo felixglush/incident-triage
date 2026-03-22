@@ -83,7 +83,7 @@ OpsRelay is a multi-service AI-powered incident management system. Five Docker s
 
 ### RAG / hybrid search
 
-`backend/app/services/ingestion.py` chunks documents and embeds them (sentence-transformers `all-MiniLM-L6-v2`, 384-dim) into the `runbook_chunks` table with pgvector.
+`backend/app/services/ingestion.py` chunks documents and embeds them (sentence-transformers `Qwen3-Embedding-0.6B`, 1024-dim) into the `runbook_chunks` table with pgvector.
 
 Retrieval (`incident_summaries.py`, `chat_orchestrator.py`) blends:
 - Vector search: `1 / (1 + l2_distance)` weighted by `RAG_VECTOR_WEIGHT` (default 0.7)
@@ -107,9 +107,9 @@ All browser API calls use **relative URLs** to `/api/opsrelay/...`. Next.js Rout
 Six SQLAlchemy models in `backend/app/models/database.py`:
 
 - **Alert** — raw webhook payload (`raw_payload` JSONB), ML outputs, extracted entities. Unique on `(source, external_id)`.
-- **Incident** — groups alerts, holds `summary`, `next_steps`, `summary_citations` (JSONB), `incident_embedding` (Vector 384).
+- **Incident** — groups alerts, holds `summary`, `next_steps`, `summary_citations` (JSONB), `incident_embedding` (Vector(1024)).
 - **IncidentAction** — immutable audit log; CASCADE-deleted with its incident.
-- **RunbookChunk** — document segments for RAG with `embedding` (Vector 384) and `search_tsv` (TSVECTOR) for hybrid search.
+- **RunbookChunk** — document segments for RAG with `embedding` (Vector(1024)) and `search_tsv` (TSVECTOR) for hybrid search.
 - **SourceDocument** — canonical pre-chunked content keyed by `(source_document, source)`; stable layer before re-chunking.
 - **Connector** — third-party integration config/status (e.g., Notion). PK is a string slug (e.g., `"notion"`).
 
