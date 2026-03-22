@@ -134,13 +134,29 @@ def test_upsert_flat_doc_chunks_have_bounded_section_content(db_session):
 
 @pytest.mark.unit
 def test_flat_doc_large_emits_warning(caplog):
-    """Flat docs over 6000 chars should log a warning."""
+    """Flat docs over 6000 chars should log a warning and still produce chunks."""
     import logging
     large_flat = "Word " * 1500  # ~7500 chars, no headers
     from app.services.ingestion import chunk_markdown_structured
     with caplog.at_level(logging.WARNING, logger="app.services.ingestion"):
-        chunk_markdown_structured(large_flat)
+        chunks = chunk_markdown_structured(large_flat)
+    assert chunks  # produced at least one chunk
     assert any("no ## headers" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_flat_doc_no_title_chunks_have_section_header_none_or_empty():
+    """Flat doc with no # title: section_header should be None (not crash)."""
+    from app.services.ingestion import chunk_markdown_structured
+    no_title_doc = "Just some content with no heading at all.\n\nAnother paragraph here."
+    chunks = chunk_markdown_structured(no_title_doc)
+    assert chunks
+    for chunk in chunks:
+        # section_content must equal content (same flat-doc rule)
+        assert chunk.section_content == chunk.content
+        # extract_title returns None when there is no # heading; section_header mirrors title
+        assert chunk.section_header is None
+        assert chunk.title is None
 
 
 @pytest.mark.unit

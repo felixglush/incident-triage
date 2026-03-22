@@ -132,8 +132,10 @@ def chunk_markdown_structured(
       - title:           document H1 title
       - chunk_index:     global sequential index across all sections
 
-    Flat-doc fallback: if no ## or ### headers exist, the entire document is
-    treated as one section (section_content = full document).
+    Flat-doc fallback: if no ## or ### headers exist, the document is split
+    by paragraph into sub-chunks (same max_chars/overlap logic). Each chunk's
+    section_content equals its own content (not the full document), keeping
+    LLM context bounded.
     """
     if not text or not text.strip():
         return []
@@ -151,6 +153,8 @@ def chunk_markdown_structured(
         chunks: List[DocumentChunk] = []
         sub_chunks = _split_section(text.strip(), max_chars, overlap)
         for sub_content in sub_chunks:
+            if not sub_content:  # guard against _split_section('') edge case
+                continue
             chunks.append(
                 DocumentChunk(
                     content=sub_content,
