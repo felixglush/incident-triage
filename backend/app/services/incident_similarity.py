@@ -302,7 +302,7 @@ def find_similar_runbook_chunks(
     for entry in candidates.values():
         chunk = entry["chunk"]
         score = _hybrid_score(entry["vector_score"], entry["bm25_score"])
-        score += _rerank_boost(query_text, chunk.title, chunk.content)
+        score += _rerank_boost(query_text, chunk.section_header or chunk.title, chunk.content)
         if score < min_score:
             continue
         ranked.append((chunk, min(score, 1.0)))
