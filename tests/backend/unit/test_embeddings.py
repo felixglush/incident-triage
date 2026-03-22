@@ -16,11 +16,13 @@ def _mock_post(embeddings: list[list[float]]):
 
 
 @pytest.mark.unit
+@pytest.mark.no_embed_patch
 def test_embedding_dim_is_1024():
     assert EMBEDDING_DIM == 1024
 
 
 @pytest.mark.unit
+@pytest.mark.no_embed_patch
 def test_embed_text_calls_ml_service():
     vec = [0.1] * 1024
     with patch("app.services.embeddings._requests.post", _mock_post([vec])) as mock_post:
@@ -32,6 +34,7 @@ def test_embed_text_calls_ml_service():
 
 
 @pytest.mark.unit
+@pytest.mark.no_embed_patch
 def test_embed_text_query_mode():
     vec = [0.2] * 1024
     with patch("app.services.embeddings._requests.post", _mock_post([vec])) as mock_post:
@@ -41,6 +44,7 @@ def test_embed_text_query_mode():
 
 
 @pytest.mark.unit
+@pytest.mark.no_embed_patch
 def test_embed_text_empty_returns_zero_vector():
     """Empty input must not call the ML service."""
     with patch("app.services.embeddings._requests.post") as mock_post:
@@ -50,6 +54,7 @@ def test_embed_text_empty_returns_zero_vector():
 
 
 @pytest.mark.unit
+@pytest.mark.no_embed_patch
 def test_embed_texts_batches_correctly():
     """With EMBED_BATCH_SIZE=2 and 5 texts, expect 3 HTTP calls."""
     vecs = [[float(i)] * 1024 for i in range(5)]
@@ -74,6 +79,7 @@ def test_embed_texts_batches_correctly():
 
 
 @pytest.mark.unit
+@pytest.mark.no_embed_patch
 def test_embed_texts_empty_list():
     with patch("app.services.embeddings._requests.post") as mock_post:
         result = embed_texts([])
@@ -82,6 +88,7 @@ def test_embed_texts_empty_list():
 
 
 @pytest.mark.unit
+@pytest.mark.no_embed_patch
 def test_embed_texts_ml_service_error_raises_runtime_error():
     import requests
     with patch("app.services.embeddings._requests.post",
@@ -91,6 +98,7 @@ def test_embed_texts_ml_service_error_raises_runtime_error():
 
 
 @pytest.mark.unit
+@pytest.mark.no_embed_patch
 def test_jaccard_similarity_retained():
     """jaccard_similarity must still be importable — used by incident_similarity.py."""
     from app.services.embeddings import jaccard_similarity
@@ -98,9 +106,22 @@ def test_jaccard_similarity_retained():
 
 
 @pytest.mark.unit
+@pytest.mark.no_embed_patch
 def test_tokens_retained():
     """_tokens must still be importable — used by incident_similarity.py."""
     from app.services.embeddings import _tokens
     tokens = _tokens("Redis connection pool exhausted")
     assert "redis" in tokens
     assert "connection" in tokens
+
+
+@pytest.mark.unit
+@pytest.mark.no_embed_patch
+def test_embed_texts_http_error_raises_runtime_error():
+    """HTTP 4xx/5xx from ML service (e.g. 503 model not loaded) raises RuntimeError."""
+    import requests
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status.side_effect = requests.HTTPError("503 Service Unavailable")
+    with patch("app.services.embeddings._requests.post", return_value=mock_resp):
+        with pytest.raises(RuntimeError, match="ML service embedding call failed"):
+            embed_texts(["some text"])

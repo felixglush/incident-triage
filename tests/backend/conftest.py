@@ -27,9 +27,9 @@ def patch_embed_text(request):
     if "unit" not in request.keywords:
         yield
         return
-    # test_embeddings.py tests the HTTP client directly — they patch _requests.post
-    # themselves and must call through to the real embed_text/embed_texts functions.
-    if request.fspath.basename == "test_embeddings.py":
+    # Tests marked no_embed_patch manage their own patching (e.g. test_embeddings.py)
+    # and must call through to the real embed_text/embed_texts functions.
+    if "no_embed_patch" in request.keywords:
         yield
         return
     # NOTE: Using 384 dims to match the current DB schema (Vector(384)).

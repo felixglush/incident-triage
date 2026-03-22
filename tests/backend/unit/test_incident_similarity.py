@@ -78,7 +78,7 @@ def test_context_key_uses_section_content():
     with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
         results = find_similar_runbook_chunks(
             db=db,
-            query_embedding=[0.1] * 384,
+            query_embedding=[0.1] * 1024,
             query_text="runbook section content",
             limit=5,
             min_score=0.0,
@@ -109,7 +109,7 @@ def test_context_key_falls_back_to_content_when_section_content_null():
     with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
         results = find_similar_runbook_chunks(
             db=db,
-            query_embedding=[0.1] * 384,
+            query_embedding=[0.1] * 1024,
             query_text="legacy runbook content",
             limit=5,
             min_score=0.0,
@@ -152,7 +152,7 @@ def test_deduplication_collapses_siblings_to_one_result():
     with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
         results = find_similar_runbook_chunks(
             db=db,
-            query_embedding=[0.1] * 384,
+            query_embedding=[0.1] * 1024,
             query_text="redis session store memory exhaustion fix",
             limit=5,
             min_score=0.0,
@@ -187,7 +187,7 @@ def test_deduplication_limit_respected():
     with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
         results = find_similar_runbook_chunks(
             db=db,
-            query_embedding=[0.1] * 384,
+            query_embedding=[0.1] * 1024,
             query_text="doc content section",
             limit=1,
             min_score=0.0,
@@ -235,7 +235,7 @@ def test_deduplication_legacy_null_section_header():
     with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
         results = find_similar_runbook_chunks(
             db=db,
-            query_embedding=[0.1] * 384,
+            query_embedding=[0.1] * 1024,
             query_text="legacy runbook chunk content",
             limit=5,
             min_score=0.0,
@@ -302,7 +302,7 @@ def test_jaccard_fallback_context_key_and_dedup():
 
         results = find_similar_runbook_chunks(
             db=db,
-            query_embedding=[0.1] * 384,
+            query_embedding=[0.1] * 1024,
             query_text="jaccard fallback content chunk",
             limit=5,
             min_score=0.0,
