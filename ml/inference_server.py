@@ -5,7 +5,7 @@ Provides classification and entity extraction for alerts
 import logging
 import re
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -53,6 +53,15 @@ class EntityResponse(BaseModel):
     region: Optional[str] = None
     error_code: Optional[str] = None
     entity_source: Optional[str] = None
+
+
+class EmbedRequest(BaseModel):
+    texts: list[str]
+    mode: Literal["document", "query"] = "document"
+
+
+class EmbedResponse(BaseModel):
+    embeddings: list[list[float]]
 
 
 # Request logging middleware
@@ -339,17 +348,8 @@ def _extract_error_code(text: str) -> Optional[str]:
     return None
 
 
-class EmbedRequest(BaseModel):
-    texts: list[str]
-    mode: str = "document"   # "document" | "query"
-
-
-class EmbedResponse(BaseModel):
-    embeddings: list[list[float]]
-
-
 @app.post("/embed", response_model=EmbedResponse)
-def embed(request: EmbedRequest):
+async def embed(request: EmbedRequest):
     """Embed texts using Qwen3-Embedding-0.6B.
 
     Modes:

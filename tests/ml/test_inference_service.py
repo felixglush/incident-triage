@@ -40,6 +40,12 @@ class TestHealthEndpoint:
         data = response.json()
         assert data["status"] == "healthy"
         assert "ner_model_loaded" in data
+        assert "embedding_model_loaded" in data
+
+    def test_health_reports_embedding_model(self):
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert "embedding_model_loaded" in resp.json()
 
 
 class TestClassificationEndpoint:
@@ -435,6 +441,10 @@ class TestEdgeCases:
 class TestEmbedEndpoint:
     """Test /embed endpoint."""
 
+    @pytest.fixture
+    def client(self):
+        return TestClient(app)
+
     def test_embed_document_mode(self):
         resp = client.post("/embed", json={"texts": ["check redis connection"], "mode": "document"})
         assert resp.status_code == 200
@@ -462,7 +472,8 @@ class TestEmbedEndpoint:
         assert resp.status_code == 200
         assert resp.json()["embeddings"] == []
 
-    def test_health_reports_embedding_model(self):
-        resp = client.get("/health")
-        assert resp.status_code == 200
-        assert "embedding_model_loaded" in resp.json()
+    def test_embed_returns_503_when_model_not_loaded(self, client):
+        """When embedding model failed to load, /embed returns 503."""
+        with patch("ml.inference_server.embedding_model", None):
+            resp = client.post("/embed", json={"texts": ["test"], "mode": "document"})
+        assert resp.status_code == 503
