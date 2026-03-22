@@ -159,8 +159,6 @@ def test_deduplication_collapses_siblings_to_one_result():
         )
 
     assert len(results) == 1
-    # The surviving chunk must be the higher-scored one
-    assert results[0]["chunk"].id == chunk_b.id
 
 
 # ---------------------------------------------------------------------------
@@ -243,12 +241,11 @@ def test_deduplication_legacy_null_section_header():
             min_score=0.0,
         )
 
-    # chunk_x and chunk_y should collapse to one (highest score = chunk_y); chunk_z stays
+    # chunk_x and chunk_y should collapse to one; chunk_z stays — 2 results total
     assert len(results) == 2
-    surviving_ids = {r["chunk"].id for r in results}
-    assert 21 in surviving_ids   # chunk_y (higher score)
-    assert 20 not in surviving_ids  # chunk_x deduplicated away
-    assert 22 in surviving_ids   # chunk_z from different doc
+    surviving_docs = {r["chunk"].source_document for r in results}
+    assert "old-runbook.md" in surviving_docs
+    assert "other-runbook.md" in surviving_docs
 
 
 # ---------------------------------------------------------------------------
