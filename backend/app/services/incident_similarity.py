@@ -241,6 +241,8 @@ def find_similar_runbook_chunks(
         return results
     candidates: Dict[int, Dict[str, Any]] = {}
 
+    # Over-fetch so dedup by section still yields enough unique sections to fill `limit`.
+    # Cheap — typical limit is 3-10, so we fetch at most ~30 lightweight rows.
     raw_limit = limit * 3
 
     if HAS_PGVECTOR:
