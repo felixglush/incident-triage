@@ -87,7 +87,7 @@ def search_runbooks(
     db: Session = Depends(get_db),
 ):
     ensure_runbook_embeddings(db)
-    query_embedding = embed_text(q)
+    query_embedding = embed_text(q, mode="query")
     matches = find_similar_runbook_chunks(db, query_embedding, q, limit=limit)
     items = []
     for match in matches:

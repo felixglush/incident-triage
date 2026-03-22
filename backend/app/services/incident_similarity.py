@@ -46,7 +46,7 @@ def ensure_incident_embedding(
     include_summary: bool = True,
 ) -> List[float]:
     text = build_incident_text(incident, alerts, include_summary=include_summary)
-    embedding = embed_text(text)
+    embedding = embed_text(text, mode="query")
     incident.incident_embedding = embedding
     db.add(incident)
     return embedding

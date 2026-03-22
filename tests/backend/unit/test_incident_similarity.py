@@ -315,3 +315,32 @@ def test_jaccard_fallback_context_key_and_dedup():
     # Siblings should have been deduplicated to one result
     assert len(results) == 1
     assert results[0]["context"] == section_content
+
+
+# ---------------------------------------------------------------------------
+# Test 7: ensure_incident_embedding uses mode="query"
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_ensure_incident_embedding_uses_query_mode():
+    """ensure_incident_embedding must call embed_text with mode='query'."""
+    from unittest.mock import patch, MagicMock
+    from app.services.incident_similarity import ensure_incident_embedding
+    from app.models import Incident
+
+    incident = MagicMock(spec=Incident)
+    incident.title = "Redis down"
+    incident.summary = None
+    incident.affected_services = []
+
+    db = MagicMock()
+    db.add = MagicMock()
+
+    with patch("app.services.incident_similarity.embed_text",
+               return_value=[0.1] * 1024) as mock_embed:
+        ensure_incident_embedding(db, incident, [])
+
+    mock_embed.assert_called_once()
+    args, kwargs = mock_embed.call_args
+    assert kwargs.get("mode") == "query" or (len(args) > 1 and args[1] == "query"), \
+        "ensure_incident_embedding must use mode='query'"
