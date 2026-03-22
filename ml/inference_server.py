@@ -7,9 +7,10 @@ import re
 import time
 from typing import Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from transformers import pipeline
+from sentence_transformers import SentenceTransformer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -17,8 +18,18 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="ML Inference Service", version="2.0.0")
 
-# Global model variable
+# Global model variables
 ner_model = None
+embedding_model: Optional[SentenceTransformer] = None
+
+RUNBOOK_QUERY_INSTRUCTION = (
+    "Given an incident alert or description, retrieve relevant runbook sections "
+    "that help diagnose or resolve the issue"
+)
+
+
+def _apply_query_prefix(text: str) -> str:
+    return f"Instruct: {RUNBOOK_QUERY_INSTRUCTION}\nQuery: {text}"
 
 
 # Pydantic models
@@ -64,7 +75,7 @@ async def log_requests(request: Request, call_next):
 @app.on_event("startup")
 async def load_models():
     """Load ML models at startup"""
-    global ner_model
+    global ner_model, embedding_model
 
     logger.info("Loading BERT NER model...")
     try:
@@ -78,6 +89,16 @@ async def load_models():
         logger.error(f"Failed to load NER model: {e}")
         logger.warning("NER model unavailable - will use regex-only extraction")
 
+    logger.info("Loading Qwen3-Embedding-0.6B...")
+    try:
+        import torch
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        embedding_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B", device=device)
+        logger.info(f"✓ Embedding model loaded on {device}")
+    except Exception as e:
+        logger.error(f"Failed to load embedding model: {e}")
+        logger.warning("Embedding model unavailable")
+
 
 # Health check
 @app.get("/health")
@@ -85,7 +106,8 @@ async def health():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "ner_model_loaded": ner_model is not None
+        "ner_model_loaded": ner_model is not None,
+        "embedding_model_loaded": embedding_model is not None
     }
 
 
@@ -315,6 +337,38 @@ def _extract_error_code(text: str) -> Optional[str]:
         return match.group(1).upper()
 
     return None
+
+
+class EmbedRequest(BaseModel):
+    texts: list[str]
+    mode: str = "document"   # "document" | "query"
+
+
+class EmbedResponse(BaseModel):
+    embeddings: list[list[float]]
+
+
+@app.post("/embed", response_model=EmbedResponse)
+def embed(request: EmbedRequest):
+    """Embed texts using Qwen3-Embedding-0.6B.
+
+    Modes:
+    - document: texts encoded as-is (for ingestion)
+    - query: texts prefixed with instruction string (for retrieval)
+    """
+    if embedding_model is None:
+        raise HTTPException(status_code=503, detail="Embedding model not loaded")
+    texts = request.texts
+    if not texts:
+        return EmbedResponse(embeddings=[])
+    if request.mode == "query":
+        texts = [_apply_query_prefix(t) for t in texts]
+    vecs = embedding_model.encode(
+        texts,
+        normalize_embeddings=True,
+        batch_size=8,
+    )
+    return EmbedResponse(embeddings=vecs.tolist())
 
 
 if __name__ == "__main__":
