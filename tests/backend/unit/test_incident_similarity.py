@@ -146,7 +146,7 @@ def test_deduplication_collapses_siblings_to_one_result():
         section_content=section_content,
     )
 
-    # chunk_b has a higher score — it should be the surviving entry
+    # Both siblings share the same dedup key; exactly one should survive
     db = _mock_db_no_pgvector([(chunk_a, 0.3), (chunk_b, 0.7)])
 
     with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
