@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Alert, Incident, RunbookChunk
 from app.models.database import HAS_PGVECTOR
-from app.services.embeddings import embed_text, jaccard_similarity, _tokens
+from app.services.embeddings import embed_text, embed_texts, jaccard_similarity, _tokens
 
 
 def build_incident_text(
@@ -53,12 +53,13 @@ def ensure_incident_embedding(
 
 
 def ensure_runbook_embeddings(db: Session) -> None:
-    chunks = db.query(RunbookChunk).filter(
-        RunbookChunk.embedding.is_(None),
-    ).all()
-    for chunk in chunks:
-        text = " ".join([chunk.title or "", chunk.content or ""]).strip()
-        chunk.embedding = embed_text(text)
+    chunks = db.query(RunbookChunk).filter(RunbookChunk.embedding.is_(None)).all()
+    if not chunks:
+        return
+    texts = [" ".join([c.title or "", c.content or ""]).strip() for c in chunks]
+    embeddings = embed_texts(texts, mode="document")
+    for chunk, embedding in zip(chunks, embeddings):
+        chunk.embedding = embedding
         db.add(chunk)
 
 

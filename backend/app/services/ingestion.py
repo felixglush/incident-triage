@@ -10,7 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import RunbookChunk, SourceDocument
-from app.services.embeddings import embed_text
+from app.services.embeddings import embed_text, embed_texts
 
 
 @dataclass
@@ -319,31 +319,34 @@ def upsert_markdown_document(
     ).delete()
 
     inserted = 0
-    for chunk in chunks:
-        metadata = {
-            "tags": tags,
-            "source": source,
-            "version_hash": version_hash,
-            "title": chunk.title,
-            **extra_metadata,
-        }
-        search_text = " ".join(filter(None, [chunk.section_header, chunk.title, chunk.content])).strip()
-        db.add(
-            RunbookChunk(
-                source_document=source_document,
-                chunk_index=chunk.chunk_index,
-                title=chunk.title,
-                content=chunk.content,
-                section_header=chunk.section_header,      # NEW
-                section_content=chunk.section_content,    # NEW
-                search_tsv=func.to_tsvector("english", search_text),
-                embedding=embed_text(chunk.content),
-                doc_metadata=metadata,
-                source=source,
-                source_uri=source_uri,
+    if chunks:
+        texts = [chunk.content for chunk in chunks]
+        embeddings = embed_texts(texts, mode="document")
+        for chunk, embedding in zip(chunks, embeddings):
+            metadata = {
+                "tags": tags,
+                "source": source,
+                "version_hash": version_hash,
+                "title": chunk.title,
+                **extra_metadata,
+            }
+            search_text = " ".join(filter(None, [chunk.section_header, chunk.title, chunk.content])).strip()
+            db.add(
+                RunbookChunk(
+                    source_document=source_document,
+                    chunk_index=chunk.chunk_index,
+                    title=chunk.title,
+                    content=chunk.content,
+                    section_header=chunk.section_header,
+                    section_content=chunk.section_content,
+                    search_tsv=func.to_tsvector("english", search_text),
+                    embedding=embedding,
+                    doc_metadata=metadata,
+                    source=source,
+                    source_uri=source_uri,
+                )
             )
-        )
-        inserted += 1
+            inserted += 1
 
     return inserted
 

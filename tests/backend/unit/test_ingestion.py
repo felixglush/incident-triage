@@ -198,6 +198,34 @@ def test_upsert_unchanged_document_skips(db_session):
 
 
 @pytest.mark.unit
+def test_upsert_calls_embed_texts_once_per_document(db_session, patch_embed_text):
+    """
+    embed_texts should be called once with all chunk contents batched,
+    not once per chunk.
+    """
+    from unittest.mock import patch
+    from app.services import ingestion as ing_module
+
+    call_count = 0
+
+    def counting_embed_texts(texts, mode="document"):
+        nonlocal call_count
+        call_count += 1
+        return [[0.1] * 1024 for _ in texts]
+
+    with patch.object(ing_module, "embed_texts", counting_embed_texts):
+        upsert_markdown_document(
+            db_session,
+            source_document="queue-workers-runbook.md",
+            source="runbooks",
+            source_uri=None,
+            content=STRUCTURED_DOC,
+        )
+
+    assert call_count == 1, f"Expected 1 batch call, got {call_count}"
+
+
+@pytest.mark.unit
 def test_upsert_changed_document_replaces_chunks(db_session):
     """Re-ingesting a changed document replaces all chunks."""
     upsert_markdown_document(
