@@ -91,6 +91,24 @@ def _rerank_boost(query_text: str, title: str | None, content: str | None) -> fl
     return boost
 
 
+def _dedup_by_section(
+    ranked: list,  # List[Tuple[RunbookChunk, float]]
+) -> list:
+    """Deduplicate by (source_document, section_header), keeping highest-scoring entry.
+
+    For legacy chunks where section_header is NULL, group by source_document alone.
+    Input must be pre-sorted descending by score so the first entry per key wins.
+    """
+    seen: dict = {}
+    deduped = []
+    for chunk, score in ranked:
+        key = (chunk.source_document, chunk.section_header)
+        if key not in seen:
+            seen[key] = True
+            deduped.append((chunk, score))
+    return deduped
+
+
 def _structured_boost(query: Incident, candidate: Incident) -> float:
     boost = 0.0
     if query.severity == candidate.severity:
@@ -223,6 +241,8 @@ def find_similar_runbook_chunks(
         return results
     candidates: Dict[int, Dict[str, Any]] = {}
 
+    raw_limit = limit * 3
+
     if HAS_PGVECTOR:
         try:
             distance = RunbookChunk.embedding.l2_distance(query_embedding)
@@ -230,7 +250,7 @@ def find_similar_runbook_chunks(
                 db.query(RunbookChunk, distance.label("distance"))
                 .filter(RunbookChunk.embedding.isnot(None), RunbookChunk.source == "runbooks")
                 .order_by(distance.asc())
-                .limit(limit)
+                .limit(raw_limit)
                 .all()
             )
             for chunk, dist in rows:
@@ -250,7 +270,7 @@ def find_similar_runbook_chunks(
                     RunbookChunk.search_tsv.op("@@")(ts_query),
                 )
                 .order_by(desc("bm25_score"))
-                .limit(limit)
+                .limit(raw_limit)
                 .all()
             )
             for chunk, bm25_score in bm25_rows:
@@ -267,14 +287,15 @@ def find_similar_runbook_chunks(
             chunk_text = " ".join([chunk.title or "", chunk.content or ""]).strip()
             keyword_score = jaccard_similarity(query_tokens, _tokens(chunk_text))
             score = _hybrid_score(0.0, keyword_score)
-            score += _rerank_boost(query_text, chunk.title, chunk.content)
+            score += _rerank_boost(query_text, chunk.section_header or chunk.title, chunk.content)
             if score < min_score:
                 continue
             matches.append((chunk, score))
 
         matches.sort(key=lambda item: item[1], reverse=True)
+        matches = _dedup_by_section(matches)
         for chunk, score in matches[:limit]:
-            results.append({"chunk": chunk, "score": score})
+            results.append({"chunk": chunk, "score": score, "context": chunk.section_content or chunk.content})
         return results
 
     ranked: List[Tuple[RunbookChunk, float]] = []
@@ -287,7 +308,8 @@ def find_similar_runbook_chunks(
         ranked.append((chunk, min(score, 1.0)))
 
     ranked.sort(key=lambda item: item[1], reverse=True)
+    ranked = _dedup_by_section(ranked)
     for chunk, score in ranked[:limit]:
-        results.append({"chunk": chunk, "score": score})
+        results.append({"chunk": chunk, "score": score, "context": chunk.section_content or chunk.content})
 
     return results
