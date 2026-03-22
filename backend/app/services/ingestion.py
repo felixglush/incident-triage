@@ -291,9 +291,6 @@ def upsert_markdown_document(
             )
         )
 
-    if not document_changed:
-        return 0
-
     db.query(RunbookChunk).filter(
         RunbookChunk.source_document == source_document,
         RunbookChunk.source == source,

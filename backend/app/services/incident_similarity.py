@@ -55,7 +55,6 @@ def ensure_incident_embedding(
 def ensure_runbook_embeddings(db: Session) -> None:
     chunks = db.query(RunbookChunk).filter(
         RunbookChunk.embedding.is_(None),
-        RunbookChunk.source == "runbooks",
     ).all()
     for chunk in chunks:
         text = " ".join([chunk.title or "", chunk.content or ""]).strip()
@@ -250,7 +249,7 @@ def find_similar_runbook_chunks(
             distance = RunbookChunk.embedding.l2_distance(query_embedding)
             rows = (
                 db.query(RunbookChunk, distance.label("distance"))
-                .filter(RunbookChunk.embedding.isnot(None), RunbookChunk.source == "runbooks")
+                .filter(RunbookChunk.embedding.isnot(None))
                 .order_by(distance.asc())
                 .limit(raw_limit)
                 .all()
@@ -268,7 +267,6 @@ def find_similar_runbook_chunks(
                 db.query(RunbookChunk, func.ts_rank_cd(RunbookChunk.search_tsv, ts_query).label("bm25_score"))
                 .filter(
                     RunbookChunk.search_tsv.isnot(None),
-                    RunbookChunk.source == "runbooks",
                     RunbookChunk.search_tsv.op("@@")(ts_query),
                 )
                 .order_by(desc("bm25_score"))
@@ -285,7 +283,7 @@ def find_similar_runbook_chunks(
 
     if not candidates:
         matches: List[Tuple[RunbookChunk, float]] = []
-        for chunk in db.query(RunbookChunk).filter(RunbookChunk.source == "runbooks").all():
+        for chunk in db.query(RunbookChunk).all():
             chunk_text = " ".join([chunk.title or "", chunk.content or ""]).strip()
             keyword_score = jaccard_similarity(query_tokens, _tokens(chunk_text))
             score = _hybrid_score(0.0, keyword_score)
