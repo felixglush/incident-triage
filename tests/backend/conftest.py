@@ -8,8 +8,40 @@ Provides fixtures for:
 """
 
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def patch_embed_text(request):
+    """
+    Auto-patch embed_text/embed_texts for unit tests so they don't call the ML service.
+    Integration tests are excluded — they manage their own DB state and may need
+    real (or explicitly mocked) embeddings.
+
+    embed_texts uses a side_effect so it scales with input size — returning
+    [fake_vec] * len(texts) regardless of batch count. This prevents mismatched
+    zip() calls when upsert_markdown_document embeds multiple chunks at once.
+    """
+    if "unit" not in request.keywords:
+        yield
+        return
+    # test_embeddings.py tests the HTTP client directly — they patch _requests.post
+    # themselves and must call through to the real embed_text/embed_texts functions.
+    if request.fspath.basename == "test_embeddings.py":
+        yield
+        return
+    # NOTE: Using 384 dims to match the current DB schema (Vector(384)).
+    # Task 6 will bump this to 1024 alongside the schema migration.
+    fake_vec = [0.1] * 384
+
+    def _fake_embed_texts(texts, mode="document"):
+        return [fake_vec for _ in texts]
+
+    with patch("app.services.embeddings.embed_texts", side_effect=_fake_embed_texts) as _mock, \
+         patch("app.services.embeddings.embed_text", return_value=fake_vec):
+        yield _mock
 
 
 @pytest.fixture
