@@ -198,7 +198,8 @@ def test_upsert_unchanged_document_skips(db_session):
 
 
 @pytest.mark.unit
-def test_upsert_calls_embed_texts_once_per_document(db_session, patch_embed_text):
+@pytest.mark.no_embed_patch
+def test_upsert_calls_embed_texts_once_per_document(db_session):
     """
     embed_texts should be called once with all chunk contents batched,
     not once per chunk.
