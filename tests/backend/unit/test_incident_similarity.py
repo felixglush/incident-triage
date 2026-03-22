@@ -318,12 +318,12 @@ def test_jaccard_fallback_context_key_and_dedup():
 
 
 # ---------------------------------------------------------------------------
-# Test 7: ensure_incident_embedding uses mode="query"
+# Test 7: ensure_incident_embedding uses mode="document"
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
-def test_ensure_incident_embedding_uses_query_mode():
-    """ensure_incident_embedding must call embed_text with mode='query'."""
+def test_ensure_incident_embedding_uses_document_mode():
+    """ensure_incident_embedding must call embed_text with mode='document'."""
     from unittest.mock import patch, MagicMock
     from app.services.incident_similarity import ensure_incident_embedding
     from app.models import Incident
@@ -342,5 +342,5 @@ def test_ensure_incident_embedding_uses_query_mode():
 
     mock_embed.assert_called_once()
     args, kwargs = mock_embed.call_args
-    assert kwargs.get("mode") == "query" or (len(args) > 1 and args[1] == "query"), \
-        "ensure_incident_embedding must use mode='query'"
+    assert kwargs.get("mode") == "document" or (len(args) > 1 and args[1] == "document"), \
+        "ensure_incident_embedding must use mode='document'"
