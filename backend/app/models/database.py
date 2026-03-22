@@ -353,8 +353,8 @@ class RunbookChunk(Base):
     - Queried by semantic similarity, not by incident ID
 
     Design decisions:
-    - Embedding dimension: 384 (all-MiniLM-L6-v2) or 768 (BERT)
-    - Uses pgvector (Vector(384)) if available, otherwise JSONB for compatibility
+    - Embedding dimension: 1024 (Qwen3-Embedding-0.6B)
+    - Uses pgvector (Vector(1024)) if available, otherwise JSONB for compatibility
     - source_document stores filename for citation (no FK to other table)
     - chunk_index allows proper ordering of chunks within a document
     - Unique constraint on (source_document, chunk_index) prevents duplicate chunks
