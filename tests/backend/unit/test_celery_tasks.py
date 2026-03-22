@@ -221,7 +221,7 @@ class TestProcessAlertTask:
         assert any(action.action_type == ActionType.STATUS_CHANGE for action in actions)
 
 
-class TestIncidentGroupingLogic:
+class TestGroupAlertsIntoIncidents:
     """Test suite for incident grouping algorithm."""
 
     @pytest.mark.unit
@@ -248,8 +248,9 @@ class TestIncidentGroupingLogic:
 
     @pytest.mark.unit
     @pytest.mark.database
-    def test_alerts_within_window_grouped_together(self, db_session):
+    def test_alerts_within_window_grouped_together(self, db_session, monkeypatch):
         """Test that alerts within 5-minute window are grouped together."""
+        monkeypatch.setenv("ALERT_GROUPING_WINDOW_MINUTES", "30")
         configure_factories(db_session)
 
         # Create base time
@@ -281,8 +282,9 @@ class TestIncidentGroupingLogic:
 
     @pytest.mark.unit
     @pytest.mark.database
-    def test_alerts_outside_window_create_separate_incidents(self, db_session):
+    def test_alerts_outside_window_create_separate_incidents(self, db_session, monkeypatch):
         """Test that alerts outside 5-minute window create separate incidents."""
+        monkeypatch.setenv("ALERT_GROUPING_WINDOW_MINUTES", "5")
         configure_factories(db_session)
 
         base_time = datetime.now(timezone.utc)
@@ -415,6 +417,46 @@ class TestIncidentGroupingLogic:
         assert len(actions) >= 1
         # First action should be incident creation
         assert actions[0].action_type in [ActionType.STATUS_CHANGE, ActionType.ALERT_ADDED]
+
+    @pytest.mark.unit
+    @pytest.mark.database
+    def test_grouping_window_respects_env_var_wide(self, db_session, monkeypatch):
+        """Alerts 10 min apart group together when window is 15 min."""
+        monkeypatch.setenv("ALERT_GROUPING_WINDOW_MINUTES", "15")
+        configure_factories(db_session)
+        base_time = datetime.now(timezone.utc)
+
+        alert1 = AlertFactory(alert_timestamp=base_time, incident_id=None)
+        db_session.commit()
+        incident_id_1 = group_alerts_into_incidents(db_session, alert1)
+
+        alert2 = AlertFactory(
+            alert_timestamp=base_time + timedelta(minutes=10), incident_id=None
+        )
+        db_session.commit()
+        incident_id_2 = group_alerts_into_incidents(db_session, alert2)
+
+        assert incident_id_1 == incident_id_2
+
+    @pytest.mark.unit
+    @pytest.mark.database
+    def test_grouping_window_respects_env_var_narrow(self, db_session, monkeypatch):
+        """Alerts 10 min apart create separate incidents when window is 5 min."""
+        monkeypatch.setenv("ALERT_GROUPING_WINDOW_MINUTES", "5")
+        configure_factories(db_session)
+        base_time = datetime.now(timezone.utc)
+
+        alert1 = AlertFactory(alert_timestamp=base_time, incident_id=None)
+        db_session.commit()
+        incident_id_1 = group_alerts_into_incidents(db_session, alert1)
+
+        alert2 = AlertFactory(
+            alert_timestamp=base_time + timedelta(minutes=10), incident_id=None
+        )
+        db_session.commit()
+        incident_id_2 = group_alerts_into_incidents(db_session, alert2)
+
+        assert incident_id_1 != incident_id_2
 
 
 class TestCeleryTaskRetryLogic:

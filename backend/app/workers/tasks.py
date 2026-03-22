@@ -229,7 +229,7 @@ def group_alerts_into_incidents(db, alert: Alert) -> int:
     Group alert into incident based on time window and similarity.
 
     Phase 1 Logic:
-    - Simple time-window based grouping (5 minutes)
+    - Simple time-window based grouping (configurable via ALERT_GROUPING_WINDOW_MINUTES, default 30 minutes)
     - Finds recent open incidents
     - Adds alert to most recent incident OR creates new one
 
@@ -245,14 +245,15 @@ def group_alerts_into_incidents(db, alert: Alert) -> int:
         int: Incident ID (created or matched)
 
     Algorithm:
-    1. Look back 5 minutes from alert timestamp
+    1. Look back configurable window (ALERT_GROUPING_WINDOW_MINUTES) from alert timestamp
     2. Find incidents with status = OPEN or INVESTIGATING
     3. If found: add to most recent incident
     4. If not found: create new incident
     """
     try:
-        # Calculate time window (5 minutes before alert)
-        time_window = alert.alert_timestamp - timedelta(minutes=5)
+        # Calculate time window — configurable for realistic cascade scenarios
+        window_minutes = int(os.getenv("ALERT_GROUPING_WINDOW_MINUTES", "30"))
+        time_window = alert.alert_timestamp - timedelta(minutes=window_minutes)
 
         logger.debug(f"Looking for incidents between {time_window} and {alert.alert_timestamp}")
 
