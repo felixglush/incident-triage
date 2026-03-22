@@ -148,7 +148,25 @@ def chunk_markdown_structured(
     if has_headers:
         sections = _extract_sections(text, title)
     else:
-        sections = [(title, text.strip())]
+        chunks: List[DocumentChunk] = []
+        sub_chunks = _split_section(text.strip(), max_chars, overlap)
+        for sub_content in sub_chunks:
+            chunks.append(
+                DocumentChunk(
+                    content=sub_content,
+                    chunk_index=len(chunks),
+                    title=title,
+                    section_header=title,
+                    section_content=sub_content,
+                )
+            )
+        if len(text.strip()) > 6000:
+            logging.getLogger(__name__).warning(
+                "Flat document (%d chars) has no ## headers — "
+                "consider adding section headers for better RAG retrieval",
+                len(text.strip()),
+            )
+        return chunks
 
     chunks: List[DocumentChunk] = []
 

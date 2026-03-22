@@ -30,9 +30,21 @@ Restart workers and deploy fix.
 
 FLAT_DOC = """# Simple Guide
 
-This is a flat document with no section headers.
+This is a flat document with no section headers. It contains enough content to
+fill the first paragraph so that the chunker can split it into multiple pieces.
+Each paragraph here is intentionally verbose so that the total character count
+pushes beyond the default max_chars threshold and forces at least two chunks.
 
-It has multiple paragraphs but no H2 or H3 headings.
+The second paragraph continues the guide with more detail about the subject at
+hand. It also has no H2 or H3 headings anywhere in the document. The purpose of
+having this much text is to ensure the structured chunker splits this flat
+document into multiple sub-chunks, each with its own bounded section_content.
+
+A third paragraph appears here to provide further assurance that the document
+is long enough. Without multiple paragraphs of reasonable length the chunker
+would produce a single chunk whose content equals the full document, making it
+impossible to distinguish the new behaviour from the old buggy behaviour in
+automated tests. This paragraph pushes the total well past 1000 characters.
 """
 
 
@@ -91,8 +103,12 @@ def test_upsert_section_header_in_search_tsv(db_session):
 
 
 @pytest.mark.unit
-def test_upsert_flat_doc_section_content_is_full_document(db_session):
-    """Flat docs (no ## / ### headers): section_content equals the full document text."""
+def test_upsert_flat_doc_chunks_have_bounded_section_content(db_session):
+    """
+    Flat docs (no ## / ### headers): each chunk's section_content equals its
+    own content — NOT the full document. This prevents unbounded parent-doc
+    text from being injected into LLM prompts.
+    """
     upsert_markdown_document(
         db_session,
         source_document="simple-guide.md",
@@ -109,8 +125,22 @@ def test_upsert_flat_doc_section_content_is_full_document(db_session):
     )
     assert chunks
     for chunk in chunks:
-        assert chunk.section_content == FLAT_DOC.strip()
+        # section_content must equal content, not the full document
+        assert chunk.section_content == chunk.content
         assert chunk.section_header == "Simple Guide"
+        # no chunk's section_content should be the full doc
+        assert chunk.section_content != FLAT_DOC.strip()
+
+
+@pytest.mark.unit
+def test_flat_doc_large_emits_warning(caplog):
+    """Flat docs over 6000 chars should log a warning."""
+    import logging
+    large_flat = "Word " * 1500  # ~7500 chars, no headers
+    from app.services.ingestion import chunk_markdown_structured
+    with caplog.at_level(logging.WARNING, logger="app.services.ingestion"):
+        chunk_markdown_structured(large_flat)
+    assert any("no ## headers" in r.message for r in caplog.records)
 
 
 @pytest.mark.unit
