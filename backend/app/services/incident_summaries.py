@@ -146,7 +146,10 @@ def summarize_incident(
     )
 
     query_text = build_incident_text(incident, alerts, include_summary=False)
-    query_embedding = embed_text(query_text, mode="query")
+    try:
+        query_embedding = embed_text(query_text, mode="query")
+    except RuntimeError:
+        query_embedding = None
     runbook_chunks = find_similar_runbook_chunks(
         db,
         query_embedding,
