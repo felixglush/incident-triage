@@ -127,7 +127,7 @@ def main() -> None:
 
     if not SCENARIOS_FILE.exists():
         print(f"Fixture not found: {SCENARIOS_FILE}", file=sys.stderr)
-        print("Run: python datasets/generate_synthetic_scenarios.py", file=sys.stderr)
+        print("Run: python datasets/validate_synthetic_scenarios.py", file=sys.stderr)
         sys.exit(1)
 
     scenarios = json.loads(SCENARIOS_FILE.read_text())
