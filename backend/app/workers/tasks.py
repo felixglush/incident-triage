@@ -10,9 +10,11 @@ Key responsibilities:
 """
 import logging
 import os
+import zlib
 from datetime import datetime, timedelta, timezone
 
 import requests
+from sqlalchemy import func, text
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.workers.celery_app import celery_app
@@ -25,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 # ML service URL from environment
 ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8001")
+
 
 
 @celery_app.task(bind=True, max_retries=3)
@@ -230,6 +233,33 @@ def _summarize_entity_source(entity_sources: dict) -> str:
         return unique_sources.pop()
     return "mixed"
 
+def _extract_service_key(alert: Alert) -> str:
+    """
+    Extract a consistent service key from the raw payload for advisory lock keying.
+
+    Must agree across platforms (Datadog/Sentry) for alerts from the same service,
+    so we read the raw payload rather than ML-extracted service_name which may be
+    null for Sentry alerts that lack tags.
+    """
+    payload = alert.raw_payload or {}
+
+    # Datadog: tags array contains "service:checkout-payments"
+    for tag in payload.get("tags") or []:
+        if isinstance(tag, str) and tag.startswith("service:"):
+            return tag.split(":", 1)[1]
+
+    # Sentry: data.issue.project.name = "checkout-payments"
+    try:
+        project_name = payload["data"]["issue"]["project"]["name"]
+        if project_name:
+            return project_name
+    except (KeyError, TypeError):
+        pass
+
+    # Fall back to ML-extracted service_name, then source
+    return alert.service_name or alert.source or "unknown"
+
+
 def group_alerts_into_incidents(db, alert: Alert) -> int:
     """
     Group alert into incident based on time window and similarity.
@@ -257,17 +287,52 @@ def group_alerts_into_incidents(db, alert: Alert) -> int:
     4. If not found: create new incident
     """
     try:
+        # Acquire advisory lock keyed on service name to serialize grouping for
+        # alerts from the same service. Prevents concurrent workers from each
+        # seeing "no existing incident" and creating duplicate incidents.
+        # Lock is released automatically when the transaction commits/rolls back.
+        #
+        # Lock key must be consistent across platforms for the same service, so
+        # we extract from raw payload directly rather than relying on ML-extracted
+        # service_name (which may be null for Sentry alerts lacking tags).
+        service_key = _extract_service_key(alert)
+        lock_key = zlib.crc32(service_key.encode()) & 0x7FFFFFFF
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+        logger.debug(f"Acquired grouping lock for service '{service_key}' (key={lock_key})")
+
         # Calculate time window — configurable for realistic cascade scenarios
         window_minutes = int(os.getenv("ALERT_GROUPING_WINDOW_MINUTES", "30"))
         time_window = alert.alert_timestamp - timedelta(minutes=window_minutes)
 
         logger.debug(f"Looking for incidents between {time_window} and {alert.alert_timestamp}")
 
-        # Find recent open incidents within time window
-        recent_incidents = db.query(Incident).filter(
-            Incident.status.in_([IncidentStatus.OPEN, IncidentStatus.INVESTIGATING]),
-            Incident.created_at >= time_window
-        ).order_by(Incident.created_at.desc()).all()
+        # Subquery: latest alert_timestamp per incident
+        latest_alert_subq = (
+            db.query(
+                Alert.incident_id,
+                func.max(Alert.alert_timestamp).label("latest_alert_at"),
+            )
+            .filter(Alert.incident_id.isnot(None))
+            .group_by(Alert.incident_id)
+            .subquery()
+        )
+
+        # Find open incidents whose most recent alert falls within the window.
+        # The upper bound extends forward by window_minutes to handle out-of-order
+        # processing: if a later-timestamped alert was processed first and created
+        # the incident, an earlier-timestamped alert must still be able to join it.
+        forward_window = alert.alert_timestamp + timedelta(minutes=window_minutes)
+        recent_incidents = (
+            db.query(Incident)
+            .join(latest_alert_subq, latest_alert_subq.c.incident_id == Incident.id)
+            .filter(
+                Incident.status.in_([IncidentStatus.OPEN, IncidentStatus.INVESTIGATING]),
+                latest_alert_subq.c.latest_alert_at >= time_window,
+                latest_alert_subq.c.latest_alert_at <= forward_window,
+            )
+            .order_by(latest_alert_subq.c.latest_alert_at.desc())
+            .all()
+        )
 
         if recent_incidents:
             # Add alert to most recent incident
