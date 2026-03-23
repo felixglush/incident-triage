@@ -153,7 +153,13 @@ def process_alert(self, alert_id: int):
                 .order_by(Alert.alert_timestamp.desc())
                 .all()
             )
-            ensure_incident_embedding(db, incident, alerts)
+            try:
+                ensure_incident_embedding(db, incident, alerts)
+            except RuntimeError as emb_err:
+                logger.warning(
+                    f"Embedding unavailable for incident {incident.id}, "
+                    f"similarity search will use BM25 only: {emb_err}"
+                )
             db.commit()
 
         logger.info(f"Alert {alert_id} processed successfully, incident_id={incident_id}")
