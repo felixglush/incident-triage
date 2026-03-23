@@ -101,7 +101,12 @@ async def load_models():
     logger.info("Loading Qwen3-Embedding-0.6B...")
     try:
         import torch
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
         embedding_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B", device=device)
         logger.info(f"✓ Embedding model loaded on {device}")
     except Exception as e:
