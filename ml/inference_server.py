@@ -111,7 +111,7 @@ async def load_models():
 
 # Health check
 @app.get("/health")
-async def health():
+def health():
     """Health check endpoint"""
     return {
         "status": "healthy",
@@ -122,7 +122,7 @@ async def health():
 
 # Classification endpoint
 @app.post("/classify", response_model=ClassificationResponse)
-async def classify_alert(request: ClassificationRequest):
+def classify_alert(request: ClassificationRequest):
     """
     Classify alert severity and team using rule-based heuristics.
 
@@ -216,7 +216,7 @@ def _classify_team(text: str) -> tuple[str, float]:
 
 # Entity extraction endpoint
 @app.post("/extract-entities", response_model=EntityResponse)
-async def extract_entities(request: NERRequest):
+def extract_entities(request: NERRequest):
     """
     Extract entities using hybrid approach: regex (fast) + NER (fallback).
 
@@ -349,7 +349,7 @@ def _extract_error_code(text: str) -> Optional[str]:
 
 
 @app.post("/embed", response_model=EmbedResponse)
-async def embed(request: EmbedRequest):
+def embed(request: EmbedRequest):
     """Embed texts using Qwen3-Embedding-0.6B.
 
     Modes:
