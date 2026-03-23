@@ -220,6 +220,8 @@ ml/models/*.safetensors
 # Data
 datasets/*.csv
 datasets/*.json
+# Committed fixtures (exceptions to the rule above)
+!datasets/synthetic_scenarios.json
 
 # IDE
 .vscode/

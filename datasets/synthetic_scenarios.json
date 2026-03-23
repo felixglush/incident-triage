@@ -1,0 +1,715 @@
+[
+  {
+    "scenario_id": "inc-2024-0112-checkout-latency",
+    "service": "checkout-payments",
+    "postmortem_ref": "inc-2024-0112",
+    "description": "Redis memory exhaustion during Black Friday caused cart session eviction and database connection pool saturation.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0112-001",
+          "title": "Redis Memory Critical - Checkout Service",
+          "body": "Redis memory consumption exceeded 6.1GB (maxmemory=4GB) during Black Friday peak. Eviction policy triggered, dropping active cart sessions. 1,847 abandoned checkouts, ~$340,000 GMV lost.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:checkout-payments", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0112-002",
+              "title": "Connection pool exhausted in checkout-service",
+              "level": "fatal",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "checkout-payments",
+                "slug": "checkout-payments",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      },
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0112-003",
+          "title": "Checkout Service P99 Latency Spike",
+          "body": "P99 latency spiked to 8.5 seconds as checkout-service exhausted connection pool trying to reconstruct sessions from database. 12,300+ customers affected.",
+          "priority": "critical",
+          "last_updated": "{{TS_2}}",
+          "tags": ["service:checkout-payments", "env:production", "region:us-east-1"]
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0287-webhook-storm",
+    "service": "checkout-payments",
+    "postmortem_ref": "inc-2024-0287",
+    "description": "Stripe webhook retry storm due to upstream infrastructure issues caused duplicate order creation due to insufficient idempotency deduplication.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0287-001",
+          "title": "Payment Webhook Error Rate Spike",
+          "body": "Stripe webhook retry storm inbound with 5x normal volume. Webhook error rate exceeded 15% as checkout-service struggled to process burst. 312 duplicate orders created.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:checkout-payments", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0287-002",
+              "title": "Duplicate order created due to race condition in idempotency check",
+              "level": "error",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "checkout-payments",
+                "slug": "checkout-payments",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2025-0044-fraud-timeout",
+    "service": "checkout-payments",
+    "postmortem_ref": "inc-2025-0044",
+    "description": "Fraud-service ML model cold start caused 30-second delays without timeout, exhausting checkout-service connection pool.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2025-0044-001",
+          "title": "Checkout Success Rate Critical Drop",
+          "body": "Checkout success rate plummeted to 6% as fraud-service cold start caused goroutine pile-up. 8,900 failed attempts, ~$1.6M GMV lost in 11 minutes.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:checkout-payments", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2025-0044-002",
+              "title": "Context deadline exceeded waiting for fraud-service RPC",
+              "level": "fatal",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "checkout-payments",
+                "slug": "checkout-payments",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0331-search-corruption",
+    "service": "product-catalog",
+    "postmortem_ref": "inc-2024-0331",
+    "description": "Elasticsearch snapshot restore during index rebalancing corrupted shard mappings, causing 40% of queries to return zero results.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0331-001",
+          "title": "Elasticsearch Search Zero Results Rate Critical",
+          "body": "Search index corruption detected: 40% of common product queries returning zero results. Product discoverability broken for 87 minutes. Snapshot restore during rebalancing corrupted shard mappings.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:product-catalog", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0331-002",
+              "title": "Elasticsearch shard mapping validation failed after restore",
+              "level": "error",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "product-catalog",
+                "slug": "product-catalog",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2025-0071-feed-deadlock",
+    "service": "product-catalog",
+    "postmortem_ref": "inc-2025-0071",
+    "description": "Concurrent product update during feed sync created database lock that escalated to table-level, halting all feed processing.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2025-0071-001",
+          "title": "Product Feed Sync Job Hung",
+          "body": "Product feed sync job hung indefinitely due to table-level lock from concurrent update. 2 SKUs unable to be updated. New products invisible for 49 minutes.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:product-catalog", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2025-0071-002",
+              "title": "Database transaction timeout: feed sync deadlock",
+              "level": "fatal",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "product-catalog",
+                "slug": "product-catalog",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0089-cdn-overload",
+    "service": "cdn-storefront",
+    "postmortem_ref": "inc-2024-0089",
+    "description": "CDN origin health check misconfigured with overly strict 50ms timeout, marking healthy origin unhealthy and overloading backup.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0089-001",
+          "title": "CDN Origin 403 Error Rate Critical",
+          "body": "38 minutes of 403 errors on product image requests. Primary origin marked unhealthy by misconfigured 50ms health check timeout. All traffic routed to rate-limited backup origin. 45,000 customers affected.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:cdn-storefront", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0089-002",
+              "title": "CDN origin health check timeout misconfiguration",
+              "level": "error",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "cdn-storefront",
+                "slug": "cdn-storefront",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0198-cache-invalidation",
+    "service": "cdn-storefront",
+    "postmortem_ref": "inc-2024-0198",
+    "description": "Cache invalidation routine had off-by-one error in URL path matching, leaving stale product images served for 36 minutes.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0198-001",
+          "title": "Stale Content Detected - CDN Cache",
+          "body": "Stale product images served for 36 minutes due to cache invalidation regex off-by-one error. 34,000 impressions with incorrect product photos causing customer confusion.",
+          "priority": "high",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:cdn-storefront", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0198-002",
+              "title": "Cache invalidation purge request pattern mismatch",
+              "level": "error",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "cdn-storefront",
+                "slug": "cdn-storefront",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0445-rate-limit-surge",
+    "service": "cdn-storefront",
+    "postmortem_ref": "inc-2024-0445",
+    "description": "Cloudflare rate limit rule had incorrect subnet definition, grouping legitimate user traffic with bot patterns.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0445-001",
+          "title": "HTTP 429 Too Many Requests Surge",
+          "body": "Legitimate traffic rate-limited for 37 minutes during peak traffic. Cloudflare rule misconfigured with wrong subnet definition. Thousands of 429 responses returned to legitimate users.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:cdn-storefront", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0445-002",
+              "title": "Cloudflare rate limit rule subnet configuration error",
+              "level": "error",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "cdn-storefront",
+                "slug": "cdn-storefront",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2025-0019-asset-build-failure",
+    "service": "cdn-storefront",
+    "postmortem_ref": "inc-2025-0019",
+    "description": "Frontend build process failed silently during deployment, preventing asset upload to CDN origin.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2025-0019-001",
+          "title": "Static Assets 404 Not Found",
+          "body": "27 minutes of 404 errors on CSS/JS assets after deployment. Frontend build failed silently without uploading assets to CDN origin. 23,000 users affected with broken storefront styling.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:cdn-storefront", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2025-0019-002",
+              "title": "Missing static assets in CDN origin after deployment",
+              "level": "fatal",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "cdn-storefront",
+                "slug": "cdn-storefront",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0156-redis-flap",
+    "service": "auth-sessions",
+    "postmortem_ref": "inc-2024-0156",
+    "description": "Redis session store had no replica, network partition isolated single node with no automatic failover.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0156-001",
+          "title": "Session Store Redis Connection Lost",
+          "body": "Sessions dropped mid-request for 35 minutes as network partition isolated single Redis node. Users logged out unexpectedly. 4,100+ unexpected re-authentication attempts.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:auth-sessions", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0156-002",
+              "title": "Redis session store unavailable - connection refused",
+              "level": "fatal",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "auth-sessions",
+                "slug": "auth-sessions",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0302-jwt-refresh",
+    "service": "auth-sessions",
+    "postmortem_ref": "inc-2024-0302",
+    "description": "Token refresh logic had O(n) query to check 50,000-entry revocation list without caching, causing severe latency degradation.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0302-001",
+          "title": "JWT Token Refresh Endpoint P99 Latency Critical",
+          "body": "Token refresh endpoint P99 latency spike to 8.2 seconds. O(n) revocation list query without caching. 50,000+ revoked tokens accumulated causing 28 minutes degradation.",
+          "priority": "high",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:auth-sessions", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0302-002",
+              "title": "Slow database query in token revocation check",
+              "level": "warning",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "auth-sessions",
+                "slug": "auth-sessions",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2025-0033-saml-cert",
+    "service": "auth-sessions",
+    "postmortem_ref": "inc-2025-0033",
+    "description": "SAML IdP certificate rotated upstream without service config update, breaking enterprise SSO.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2025-0033-001",
+          "title": "SAML SSO Authentication Failure Rate Critical",
+          "body": "Enterprise SSO users unable to login for 28 minutes. SAML IdP certificate rotated upstream without service config update. 12 companies affected, escalations to account managers.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:auth-sessions", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2025-0033-002",
+              "title": "SAML signature verification failed - certificate expired",
+              "level": "error",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "auth-sessions",
+                "slug": "auth-sessions",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0118-poison-message",
+    "service": "queue-workers",
+    "postmortem_ref": "inc-2024-0118",
+    "description": "Malformed message in queue was re-queued infinitely without max retry logic, blocking all order processing.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0118-001",
+          "title": "Background Worker Queue Processing Stalled",
+          "body": "44 minutes of failed order processing. Poison message in queue re-queued infinitely without max retry threshold. 3,240 orders queued but not processed, cascading delays.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:queue-workers", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0118-002",
+              "title": "Malformed message in Celery queue - infinite retry loop",
+              "level": "fatal",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "queue-workers",
+                "slug": "queue-workers",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0377-memory-leak",
+    "service": "queue-workers",
+    "postmortem_ref": "inc-2024-0377",
+    "description": "Celery worker memory leak in task result processing held large objects in memory without cleanup.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0377-001",
+          "title": "Celery Worker Memory Exhaustion - OOM Kills",
+          "body": "Worker processes OOM-killed during high-volume processing. Memory leak in task result handling holding large objects without cleanup. 38 minutes degraded throughput, order lag accumulated.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:queue-workers", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0377-002",
+              "title": "MemoryError: worker process killed by kernel OOM",
+              "level": "fatal",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "queue-workers",
+                "slug": "queue-workers",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2025-0058-scheduling-conflict",
+    "service": "queue-workers",
+    "postmortem_ref": "inc-2025-0058",
+    "description": "Scheduled task ran concurrently with manual trigger without locking, causing duplicate inventory adjustments.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2025-0058-001",
+          "title": "Inventory Adjustment Duplicate Processing",
+          "body": "Scheduled task executed concurrently with manual trigger for 54 minutes. No distributed locking or idempotency checks. 847 items double-decremented from stock, manual reconciliation required.",
+          "priority": "high",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:queue-workers", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2025-0058-002",
+              "title": "Inventory sync task executed concurrently without lock",
+              "level": "warning",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "queue-workers",
+                "slug": "queue-workers",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0203-replica-lag",
+    "service": "database-cache",
+    "postmortem_ref": "inc-2024-0203",
+    "description": "Analytics workload on OLTP read replica without query timeout caused replica lag, serving stale inventory.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0203-001",
+          "title": "Database Read Replica Lag Critical",
+          "body": "Read replica lag reached critical threshold due to long-running analytics query. Stale inventory reads for 24 minutes. 156 items oversold, $7,200 in refunds issued.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:database-cache", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0203-002",
+              "title": "Stale data read from replica - lag exceeded threshold",
+              "level": "error",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "database-cache",
+                "slug": "database-cache",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2024-0419-pool-exhaustion",
+    "service": "database-cache",
+    "postmortem_ref": "inc-2024-0419",
+    "description": "Long-running transaction held connection without releasing, exhausting connection pool with no timeout.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2024-0419-001",
+          "title": "Database Connection Pool Exhausted",
+          "body": "Connection pool max size reached as long-running transaction held connection. Service unable to acquire DB connections for 36 minutes. All queries timing out.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:database-cache", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2024-0419-002",
+              "title": "Unable to acquire database connection - pool exhausted",
+              "level": "fatal",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "database-cache",
+                "slug": "database-cache",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "inc-2025-0012-cache-stampede",
+    "service": "database-cache",
+    "postmortem_ref": "inc-2025-0012",
+    "description": "Popular item cache keys expired simultaneously causing 500+ concurrent requests to hit database.",
+    "alerts": [
+      {
+        "platform": "datadog",
+        "payload": {
+          "id": "dd-inc-2025-0012-001",
+          "title": "Database Query Latency Spike - Cache Stampede",
+          "body": "Cache stampede detected: popular item cache keys expired simultaneously. 500+ concurrent requests hit database for same key. P99 latency 5.2 seconds, cache hit rate dropped to 2%.",
+          "priority": "critical",
+          "last_updated": "{{TS_0}}",
+          "tags": ["service:database-cache", "env:production", "region:us-east-1"]
+        }
+      },
+      {
+        "platform": "sentry",
+        "payload": {
+          "action": "triggered",
+          "data": {
+            "issue": {
+              "id": "sentry-inc-2025-0012-002",
+              "title": "Database connection timeout under cache stampede load",
+              "level": "error",
+              "lastSeen": "{{TS_1}}",
+              "project": {
+                "id": "1",
+                "name": "database-cache",
+                "slug": "database-cache",
+                "platform": "python"
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+]

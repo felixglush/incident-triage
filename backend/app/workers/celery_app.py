@@ -42,6 +42,7 @@ celery_app.conf.update(
     # Worker settings
     worker_prefetch_multiplier=4,  # Number of tasks to prefetch
     worker_max_tasks_per_child=1000,  # Recycle worker after N tasks
+
 )
 
 # Enable eager mode for tests if configured via env
