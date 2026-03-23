@@ -344,3 +344,65 @@ def test_ensure_incident_embedding_uses_document_mode():
     args, kwargs = mock_embed.call_args
     assert kwargs.get("mode") == "document" or (len(args) > 1 and args[1] == "document"), \
         "ensure_incident_embedding must use mode='document'"
+
+
+# ---------------------------------------------------------------------------
+# Test 8: None query_embedding skips vector path, BM25 still runs
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_find_similar_runbook_chunks_none_embedding_skips_vector_path():
+    """When query_embedding is None, l2_distance must never be called — BM25 runs instead."""
+    section_content = "Full section content for BM25 fallback test."
+    chunk = _make_chunk(
+        id=50,
+        source_document="bm25-runbook.md",
+        title="BM25 Runbook",
+        content="redis memory exhaustion resolution steps",
+        section_header="Redis OOM",
+        section_content=section_content,
+    )
+
+    db = _mock_db_no_pgvector([(chunk, 0.8)])
+
+    # HAS_PGVECTOR=True so the condition is exercised. Without the guard
+    # (`HAS_PGVECTOR and query_embedding is not None`), this would crash trying
+    # to call l2_distance(None). With the guard, the pgvector block is skipped
+    # and BM25 runs normally.
+    with patch("app.services.incident_similarity.HAS_PGVECTOR", True):
+        results = find_similar_runbook_chunks(
+            db=db,
+            query_embedding=None,
+            query_text="redis memory exhaustion",
+            limit=5,
+            min_score=0.0,
+        )
+
+    assert len(results) == 1
+    assert results[0]["context"] == section_content
+
+
+# ---------------------------------------------------------------------------
+# Test 9: runbook search route passes None to find_similar_runbook_chunks on embed failure
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.no_embed_patch
+def test_runbook_search_embedding_failure_falls_back_to_bm25():
+    """When embed_text raises in /runbooks/search, route passes None to find_similar_runbook_chunks."""
+    from unittest.mock import patch
+    from app.api.runbooks import search_runbooks
+
+    mock_db = MagicMock()
+
+    with patch("app.api.runbooks.embed_text",
+               side_effect=RuntimeError("ML service embedding call failed")), \
+         patch("app.api.runbooks.find_similar_runbook_chunks",
+               return_value=[]) as mock_find:
+
+        search_runbooks(q="redis memory exhaustion", limit=5, db=mock_db)
+
+    assert mock_find.called
+    actual_embedding = mock_find.call_args[0][1]
+    assert actual_embedding is None, \
+        f"Expected query_embedding=None when embed_text fails, got {actual_embedding!r}"

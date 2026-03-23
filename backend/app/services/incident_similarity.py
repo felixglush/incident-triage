@@ -8,7 +8,7 @@ while leaving room for future BM25 + vector hybrid retrieval.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import desc, func
 
@@ -230,7 +230,7 @@ def find_similar_incidents(
 
 def find_similar_runbook_chunks(
     db: Session,
-    query_embedding: List[float],
+    query_embedding: Optional[List[float]],
     query_text: str,
     limit: int = 5,
     min_score: float = MIN_SCORE,
@@ -245,7 +245,7 @@ def find_similar_runbook_chunks(
     # Cheap — typical limit is 3-10, so we fetch at most ~30 lightweight rows.
     raw_limit = limit * 3
 
-    if HAS_PGVECTOR:
+    if HAS_PGVECTOR and query_embedding is not None:
         try:
             distance = RunbookChunk.embedding.l2_distance(query_embedding)
             rows = (
