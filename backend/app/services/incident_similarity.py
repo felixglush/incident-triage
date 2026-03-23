@@ -56,7 +56,7 @@ def ensure_runbook_embeddings(db: Session) -> None:
     chunks = db.query(RunbookChunk).filter(RunbookChunk.embedding.is_(None)).all()
     if not chunks:
         return
-    texts = [" ".join([c.title or "", c.content or ""]).strip() for c in chunks]
+    texts = [c.content for c in chunks]
     embeddings = embed_texts(texts, mode="document")
     for chunk, embedding in zip(chunks, embeddings):
         chunk.embedding = embedding
