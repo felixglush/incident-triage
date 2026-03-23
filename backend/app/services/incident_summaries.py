@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 
 from app.models import Alert, Incident, SeverityLevel
+from app.services.embeddings import embed_text
 from app.services.incident_similarity import (
     build_incident_text,
     ensure_incident_embedding,
@@ -44,7 +45,8 @@ def _build_next_steps(
 
     if runbook_chunks:
         chunk = runbook_chunks[0]["chunk"]
-        steps.append(f"Check runbook: {chunk.source_document} (chunk {chunk.chunk_index})")
+        label = chunk.title or chunk.source_document
+        steps.append(f"Check runbook: {label} (chunk {chunk.chunk_index})")
 
     if not steps:
         steps.append("Gather additional context from logs and metrics")
@@ -66,7 +68,10 @@ def generate_summary(
     ]
 
     if highlights:
-        summary_lines.append("Key alerts: " + "; ".join(highlights))
+        summary_lines.append("")
+        summary_lines.append("Key alerts:")
+        for highlight in highlights:
+            summary_lines.append(f"- {highlight}")
         for alert in alerts[: min(len(alerts), 3)]:
             citations.append({
                 "type": "alert",
@@ -75,6 +80,7 @@ def generate_summary(
             })
 
     if similar_incidents:
+        summary_lines.append("")
         summary_lines.append("Similar incidents:")
         for item in similar_incidents:
             match = item["incident"]
@@ -88,18 +94,20 @@ def generate_summary(
             })
 
     if runbook_chunks:
+        summary_lines.append("")
         summary_lines.append("Relevant runbook references:")
         for item in runbook_chunks:
             chunk = item["chunk"]
             score = round(item["score"], 3)
             summary_lines.append(
-                f"- {chunk.source_document} (chunk {chunk.chunk_index})"
+                f"- {(chunk.title or chunk.source_document)} (chunk {chunk.chunk_index})"
             )
             citations.append({
                 "type": "runbook",
                 "source_document": chunk.source_document,
                 "chunk_index": chunk.chunk_index,
                 "title": chunk.title,
+                "source_uri": chunk.source_uri,
                 "score": score,
             })
 
@@ -124,7 +132,8 @@ def summarize_incident(
     )
 
     # Ensure embeddings exist
-    ensure_incident_embedding(db, incident, alerts)
+    # Exclude prior generated summary text from retrieval query context.
+    ensure_incident_embedding(db, incident, alerts, include_summary=False)
     ensure_runbook_embeddings(db)
     db.flush()
 
@@ -133,12 +142,17 @@ def summarize_incident(
         incident,
         alerts,
         limit=limit_similar,
+        include_summary=False,
     )
 
-    query_text = build_incident_text(incident, alerts)
+    query_text = build_incident_text(incident, alerts, include_summary=False)
+    try:
+        query_embedding = embed_text(query_text, mode="query")
+    except RuntimeError:
+        query_embedding = None
     runbook_chunks = find_similar_runbook_chunks(
         db,
-        incident.incident_embedding,
+        query_embedding,
         query_text,
         limit=limit_runbook,
     )

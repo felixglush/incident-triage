@@ -2,251 +2,145 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-When exiting plan mode to begin implementation, ALWAYS save the implementation plan first as a markdown file in @docs/
+When exiting plan mode to begin implementation, ALWAYS save the implementation plan first as a markdown file in `docs/`.
 
+## Commands
 
-## Project Overview
-
-**OpsRelay** is an AI-powered incident management system that automatically triages alerts from monitoring platforms (Datadog, Sentry, etc.), groups them into incidents, and provides intelligent assistance to on-call engineers through RAG-based copilot features.
-
-## Project Status
-
-This is a portfolio project currently in development. Development follows phased delivery detailed in [implementation.md](implementation.md) and [ROADMAP.md](ROADMAP.md). Architecture is summarized in [docs/architecture.md](docs/architecture.md).
-
-## Technology Stack
-
-**Backend:**
-- FastAPI (async API server)
-- PostgreSQL (primary database)
-- Celery + Redis (async task queue)
-- SQLAlchemy (ORM)
-
-**Machine Learning:**
-- Transformers library (DistilBERT for classification, BERT for NER)
-- Sentence Transformers (all-MiniLM-L6-v2 for embeddings)
-- Anthropic Claude API (RAG and summarization)
-- pgvector extension (vector similarity search)
-
-**Frontend:**
-- Next.js with React
-- TypeScript
-- Tailwind CSS
-
-**Infrastructure:**
-- Docker & Docker Compose
-- Python 3.11+
-- Node.js 18+
-
-## Architecture Overview
-
-### Data Flow
-
-1. **Alert Ingestion**: Monitoring platforms send webhooks to `/webhook/{platform}` endpoints
-2. **Webhook Handler**: FastAPI validates signatures, deduplicates, stores alert in PostgreSQL, queues for async processing
-3. **Worker Processing**: Celery worker calls ML inference service for classification and entity extraction
-4. **Incident Grouping**: Alerts are grouped into incidents based on timing, similarity, and extracted entities
-5. **Summarization**: When incidents reach thresholds, ML generates summaries
-6. **RAG Copilot**: Users query runbook knowledge base via semantic search + LLM synthesis
-
-### Key Components
-
-**Webhook Endpoints** (`backend/app/api/webhooks.py`):
-- Accept alerts from Datadog, Sentry, etc.
-- Verify signatures for security
-- Return quickly (async processing via Celery)
-- Handle duplicate detection via `external_id`
-
-**ML Inference Service** (`ml/inference_server.py`):
-- Separate FastAPI service for ML operations
-- Classification endpoint for severity and team assignment
-- Entity extraction endpoint for services, regions, environments
-- Can start with rule-based heuristics before fine-tuning models
-
-**Celery Workers** (`backend/app/workers/tasks.py`):
-- `process_alert` task: orchestrates ML classification and grouping
-- Defensive error handling (graceful degradation if ML fails)
-- Calls ML service via HTTP, updates database with results
-
-**RAG System** (`backend/app/api/chat.py`):
-- Embeds user questions using sentence-transformers
-- Performs vector similarity search via pgvector
-- Sends top-k chunks + question to Claude for answer synthesis
-- Returns answer with source citations
-
-## Database Schema
-
-**alerts** table:
-- Stores raw webhook payloads in `raw_payload` JSON column
-- ML predictions: `severity`, `predicted_team`, `confidence_score`
-- Extracted entities: `service_name`, `environment`, `region`, `error_code`
-- Foreign key to incidents table for grouping
-
-**incidents** table:
-- Aggregates related alerts
-- Contains ML-generated `summary` field
-- Tracks `status` (open, investigating, resolved)
-- JSON array of `affected_services`
-
-**runbook_chunks** table:
-- Stores documentation segments for RAG
-- `embedding` column (Vector type with pgvector)
-- Links to `source_document` for citations
-
-**incident_actions** table:
-- Timeline of actions during incident response
-- Captures status changes, comments, alert additions
-
-## Development Commands
-
-### Running Services
-
+### Start all services
 ```bash
-# Start all services with Docker Compose
-docker-compose up
+docker-compose up --build
+```
+Ports: Frontend `3001`, Backend API `8000`, ML service `8001`, Postgres `54322`, Redis `6379`.
 
-# Backend API runs on port 8000
-# PostgreSQL on port 5432
-# Redis on port 6379
+### Run tests (from project root)
+```bash
+pytest tests/
 ```
 
-### Running Celery Workers
+```bash
+# Unit tests only (fast, no DB/Redis needed)
+pytest tests/ -m unit
 
+# Integration tests (requires Postgres + Redis)
+docker-compose -f docker-compose.test.yml up -d
+pytest tests/ -m integration
+
+# Single test file
+pytest tests/backend/unit/test_signature_verification.py
+
+# Single test
+pytest tests/backend/unit/test_signature_verification.py::test_name
+```
+
+Integration tests use a separate DB on port `54323` and Redis on port `6380` (from `docker-compose.test.yml`).
+
+### Database initialization
+Run once after starting Postgres, or to reset schema:
 ```bash
 cd backend
-source venv/bin/activate
-celery -A app.workers.celery_app worker --loglevel=info
+python init_db.py           # schema only
+python init_db.py --seed    # schema + seed data
+python init_db.py --drop --yes  # WARNING: drops and recreates
 ```
 
-### Database Initialization
-
+### Frontend dev (outside Docker)
 ```bash
-# Run from Python shell or create migration script
-from app.database import init_db
-init_db()
+cd frontend && npm install && npm run dev   # port 3000
 ```
+Set `OPSRELAY_API_BASE_URL=http://localhost:8000` in the environment when running the frontend outside Docker.
 
-### ML Service
-
+### Load sample data / generate embeddings
 ```bash
-cd ml
-uvicorn inference_server:app --host 0.0.0.0 --port 8001
-```
-
-### Frontend Development
-
-```bash
-cd frontend
-npm install
-npm run dev
-# Runs on port 3000
-```
-
-### Generate Sample Data
-
-```bash
+python datasets/load_sample_data.py
 python datasets/generate_alerts.py
 python datasets/generate_runbooks.py
 ```
 
-### Generate Embeddings
-
+### RAG evals
 ```bash
-cd ml
-python generate_embeddings.py
+cd backend
+python tools/run_rag_eval.py --dataset ../datasets/evals/rag_eval_cases.jsonl --limit 5
 ```
 
-## Development Phases
+## Architecture
 
-**Phase 1 (Weeks 1-3)**: Foundation
-- Docker infrastructure setup
-- Database schema and migrations
-- FastAPI webhook endpoints
-- Basic Celery worker structure
-- Sample data generation
-- Goal: Alerts flowing from webhook → database → API
+OpsRelay is a multi-service AI-powered incident management system. Five Docker services cooperate:
 
-**Phase 2 (Weeks 4-7)**: ML Intelligence
-- ML inference service with classification models
-- Entity extraction via NER
-- RAG system implementation (embeddings + vector search)
-- Incident summarization
-- Goal: Intelligent triage and copilot assistance
+| Service | Description |
+|---|---|
+| `backend` | FastAPI API + Celery workers (Python) |
+| `ml-service` | Separate FastAPI service for ML inference (DistilBERT, BERT, sentence-transformers) |
+| `celery-worker` | Same image as `backend`, runs `celery -A app.workers.celery_app worker` |
+| `postgres` | PostgreSQL 18 with pgvector and pg_trgm extensions |
+| `frontend` | Next.js 14, proxies all API calls to `backend` |
 
-**Phase 3 (Weeks 8-12)**: UX and Integration
-- Next.js dashboard
-- Slack integration for notifications
-- Polish and demo mode
-- Goal: Production-ready demo
+### Alert → Incident pipeline
 
-## Important Design Patterns
+1. Monitoring platforms POST to `POST /webhook/{platform}` (Datadog, Sentry).
+2. `backend/app/api/webhooks.py` validates signatures, deduplicates via `(source, external_id)`, stores alert in DB, then enqueues `process_alert.delay(alert_id)` and returns immediately.
+3. The Celery worker (`backend/app/workers/tasks.py`) calls the ML service for classification (severity, team) and entity extraction (service, env, region), then runs grouping logic to assign the alert to an existing or new Incident.
+4. When an incident accumulates enough alerts (or on-demand), `incident_summaries.py` calls Claude to generate a summary, next steps, and RAG citations using hybrid search.
 
-### Async Processing
-- Webhooks must respond quickly (<2s) to avoid timeouts
-- All ML processing happens asynchronously via Celery
-- Use `process_alert.delay(alert_id)` pattern
+### RAG / hybrid search
 
-### Error Handling
-- ML service calls wrapped in try-except with fallback values
-- System gracefully degrades when components fail
-- Never lose alerts due to ML failures
+`backend/app/services/ingestion.py` chunks documents and embeds them (sentence-transformers `Qwen3-Embedding-0.6B`, 1024-dim) into the `runbook_chunks` table with pgvector.
 
-### Security
-- Verify webhook signatures from monitoring platforms
-- Use environment variables for all secrets
-- Never commit API keys or credentials
+Retrieval (`incident_summaries.py`, `chat_orchestrator.py`) blends:
+- Vector search: `1 / (1 + l2_distance)` weighted by `RAG_VECTOR_WEIGHT` (default 0.7)
+- BM25 via PostgreSQL `ts_rank_cd` weighted by `RAG_KEYWORD_WEIGHT` (default 0.3)
+- Reranker boost for title/content phrase matches
 
-### Data Preservation
-- Store complete `raw_payload` from webhooks for debugging
-- Separate `created_at` (received time) from `alert_timestamp` (occurred time)
-- Track confidence scores for ML predictions
+### Chat streaming
 
-## Configuration
+`POST /chat/{incident_id}/stream` returns a streaming response (SSE). The frontend reads it via the `EventSource`/`fetch` streaming pattern. `backend/app/api/chat.py` → `chat_orchestrator.py` → `incident_summaries.py` (which calls Claude with `stream=True`).
 
-Environment variables (set in `.env` file, never commit):
+### Frontend API proxy
 
-```
-DATABASE_URL=postgresql://opsrelay:password@localhost:5432/opsrelay
-REDIS_URL=redis://localhost:6379/0
-ML_SERVICE_URL=http://localhost:8001
-ANTHROPIC_API_KEY=sk-ant-...
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
-```
+All browser API calls use **relative URLs** to `/api/opsrelay/...`. Next.js Route Handlers in `frontend/app/api/opsrelay/` forward requests to the backend using `OPSRELAY_API_BASE_URL` (set to `http://backend:8000` in Docker). Never set `NEXT_PUBLIC_API_BASE_URL` — that would bypass the proxy. The shared helper is `frontend/app/api/opsrelay/_base.ts`.
 
-## Testing Strategy
+### Notion connector
 
-- Use sample webhook payloads for endpoint testing
-- Validate classification accuracy on labeled test set
-- Test RAG quality with predefined questions
-- Verify incident grouping logic with time-series scenarios
-- End-to-end tests from webhook to incident creation
+`backend/app/services/notion_connector.py` crawls a configured root page subtree, converts blocks to Markdown, and upserts via `ingestion.py` into `source_documents` + `runbook_chunks`. The connector state lives in the `connectors` table. Sync is triggered manually via `POST /connectors/notion/sync`; there are no Notion webhooks in v1. Requires `NOTION_TOKEN` and `NOTION_API_VERSION` env vars.
 
-## Common Pitfalls
+## Database schema
 
-- **N+1 queries**: Eagerly load related alerts when fetching incidents
-- **Memory leaks**: Always close database sessions in workers (use try-finally)
-- **Webhook timeouts**: Never do synchronous ML inference in webhook handlers
-- **Duplicate alerts**: Always check `external_id` before creating new alerts
-- **Vector dimensions**: Ensure embedding dimension (384) matches model output
+Six SQLAlchemy models in `backend/app/models/database.py`:
 
-## Production Considerations
+- **Alert** — raw webhook payload (`raw_payload` JSONB), ML outputs, extracted entities. Unique on `(source, external_id)`.
+- **Incident** — groups alerts, holds `summary`, `next_steps`, `summary_citations` (JSONB), `incident_embedding` (Vector(1024)).
+- **IncidentAction** — immutable audit log; CASCADE-deleted with its incident.
+- **RunbookChunk** — document segments for RAG with `embedding` (Vector(1024)) and `search_tsv` (TSVECTOR) for hybrid search.
+- **SourceDocument** — canonical pre-chunked content keyed by `(source_document, source)`; stable layer before re-chunking.
+- **Connector** — third-party integration config/status (e.g., Notion). PK is a string slug (e.g., `"notion"`).
 
-The implementation guide notes these are for demo/portfolio purposes:
-- Signature verification is stubbed initially
-- Start with rule-based classification before fine-tuning
-- Can use local summarization models instead of API for cost savings
-- pgvector is simpler than dedicated vector DB for moderate scale
+No migration tool — schema is managed by `init_db.py` / SQLAlchemy `create_all`.
 
-## Key Files to Reference
+## Testing patterns
 
-- [implementation.md](implementation.md): Comprehensive build guide with code examples
-- README.md: Basic project description
-- `.gitignore`: Excludes models, data, secrets, node_modules
+- Tests live in `tests/`; backend code is imported by inserting `backend/` onto `sys.path` in `conftest.py`.
+- `db_session` fixture is hybrid: unit tests use transactional rollback; integration/celery tests commit and then clean up.
+- Celery tasks run in eager mode (`CELERY_TASK_ALWAYS_EAGER=true`) — no worker process needed.
+- ML service is mocked in tests; the transformers pipeline is not loaded.
 
-## Project Goals
+## Frontend design system
 
-This is a **portfolio project** designed to demonstrate:
-- Modern ML operations (classification, NER, RAG, summarization)
-- Distributed systems (async workers, message queues)
-- REST API design with FastAPI
-- Production-ready patterns (error handling, logging, monitoring)
-- Full-stack development (backend + frontend)
+Defined fully in `frontend/CLAUDE.md`. Key rules:
+- **No rounded corners** on containers (avoid `rounded-*`).
+- Sharp, data-dense, Linear-inspired aesthetic.
+- Color tokens: `graphite`, `mist`, `slate`, `critical`, `warning`, `info`, `success`, `accent` (yellow).
+- Use `DataTable` component for all tabular data; `AppShell` for page layout.
+- Chat panel is 420px wide, right-edge, hidden below `xl` breakpoint.
+
+## Key environment variables
+
+| Var | Purpose |
+|---|---|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `REDIS_URL` | Redis connection string |
+| `ML_SERVICE_URL` | ML inference service URL |
+| `ANTHROPIC_API_KEY` | Required for summaries and chat |
+| `OPENAI_API_KEY` | Required for RAG evals (judge model) |
+| `NOTION_TOKEN` | Required for Notion connector |
+| `NOTION_API_VERSION` | Defaults to `2026-03-11` |
+| `SKIP_SIGNATURE_VERIFICATION` | Set `true` in dev to bypass webhook HMAC checks |
+| `RAG_VECTOR_WEIGHT` / `RAG_KEYWORD_WEIGHT` | Hybrid search blending weights |

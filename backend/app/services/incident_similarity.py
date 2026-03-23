@@ -8,7 +8,7 @@ while leaving room for future BM25 + vector hybrid retrieval.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import desc, func
 
@@ -16,12 +16,16 @@ from sqlalchemy.orm import Session
 
 from app.models import Alert, Incident, RunbookChunk
 from app.models.database import HAS_PGVECTOR
-from app.services.embeddings import embed_text, jaccard_similarity, _tokens
+from app.services.embeddings import embed_text, embed_texts, jaccard_similarity, _tokens
 
 
-def build_incident_text(incident: Incident, alerts: List[Alert]) -> str:
+def build_incident_text(
+    incident: Incident,
+    alerts: List[Alert],
+    include_summary: bool = True,
+) -> str:
     parts = [incident.title or ""]
-    if incident.summary:
+    if include_summary and incident.summary:
         parts.append(incident.summary)
     if incident.affected_services:
         parts.append("services: " + ", ".join(incident.affected_services))
@@ -35,22 +39,27 @@ def build_incident_text(incident: Incident, alerts: List[Alert]) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def ensure_incident_embedding(db: Session, incident: Incident, alerts: List[Alert]) -> List[float]:
-    text = build_incident_text(incident, alerts)
-    embedding = embed_text(text)
+def ensure_incident_embedding(
+    db: Session,
+    incident: Incident,
+    alerts: List[Alert],
+    include_summary: bool = True,
+) -> List[float]:
+    text = build_incident_text(incident, alerts, include_summary=include_summary)
+    embedding = embed_text(text, mode="document")
     incident.incident_embedding = embedding
     db.add(incident)
     return embedding
 
 
 def ensure_runbook_embeddings(db: Session) -> None:
-    chunks = db.query(RunbookChunk).filter(
-        RunbookChunk.embedding.is_(None),
-        RunbookChunk.source == "runbooks",
-    ).all()
-    for chunk in chunks:
-        text = " ".join([chunk.title or "", chunk.content or ""]).strip()
-        chunk.embedding = embed_text(text)
+    chunks = db.query(RunbookChunk).filter(RunbookChunk.embedding.is_(None)).all()
+    if not chunks:
+        return
+    texts = [c.content for c in chunks]
+    embeddings = embed_texts(texts, mode="document")
+    for chunk, embedding in zip(chunks, embeddings):
+        chunk.embedding = embedding
         db.add(chunk)
 
 
@@ -80,6 +89,24 @@ def _rerank_boost(query_text: str, title: str | None, content: str | None) -> fl
     if content and lowered in content.lower():
         boost += RERANK_PHRASE_BOOST
     return boost
+
+
+def _dedup_by_section(
+    ranked: list,  # List[Tuple[RunbookChunk, float]]
+) -> list:
+    """Deduplicate by (source_document, section_header), keeping highest-scoring entry.
+
+    For legacy chunks where section_header is NULL, group by source_document alone.
+    Input must be pre-sorted descending by score so the first entry per key wins.
+    """
+    seen: dict = {}
+    deduped = []
+    for chunk, score in ranked:
+        key = (chunk.source_document, chunk.section_header)
+        if key not in seen:
+            seen[key] = True
+            deduped.append((chunk, score))
+    return deduped
 
 
 def _structured_boost(query: Incident, candidate: Incident) -> float:
@@ -115,13 +142,19 @@ def find_similar_incidents(
     limit: int = 5,
     min_score: float = MIN_SCORE,
     min_keyword_overlap: float = MIN_KEYWORD_OVERLAP,
+    include_summary: bool = True,
 ) -> List[Dict[str, Any]]:
     query_embedding = incident.incident_embedding
     if query_embedding is None:
-        query_embedding = ensure_incident_embedding(db, incident, alerts)
+        query_embedding = ensure_incident_embedding(
+            db,
+            incident,
+            alerts,
+            include_summary=include_summary,
+        )
 
     results: List[Dict[str, Any]] = []
-    query_tokens = _tokens(build_incident_text(incident, alerts))
+    query_tokens = _tokens(build_incident_text(incident, alerts, include_summary=include_summary))
     query_services = set(incident.affected_services or [])
     if not query_tokens and not query_services:
         return results
@@ -197,7 +230,7 @@ def find_similar_incidents(
 
 def find_similar_runbook_chunks(
     db: Session,
-    query_embedding: List[float],
+    query_embedding: Optional[List[float]],
     query_text: str,
     limit: int = 5,
     min_score: float = MIN_SCORE,
@@ -208,14 +241,18 @@ def find_similar_runbook_chunks(
         return results
     candidates: Dict[int, Dict[str, Any]] = {}
 
-    if HAS_PGVECTOR:
+    # Over-fetch so dedup by section still yields enough unique sections to fill `limit`.
+    # Cheap — typical limit is 3-10, so we fetch at most ~30 lightweight rows.
+    raw_limit = limit * 3
+
+    if HAS_PGVECTOR and query_embedding is not None:
         try:
             distance = RunbookChunk.embedding.l2_distance(query_embedding)
             rows = (
                 db.query(RunbookChunk, distance.label("distance"))
-                .filter(RunbookChunk.embedding.isnot(None), RunbookChunk.source == "runbooks")
+                .filter(RunbookChunk.embedding.isnot(None))
                 .order_by(distance.asc())
-                .limit(limit)
+                .limit(raw_limit)
                 .all()
             )
             for chunk, dist in rows:
@@ -231,11 +268,10 @@ def find_similar_runbook_chunks(
                 db.query(RunbookChunk, func.ts_rank_cd(RunbookChunk.search_tsv, ts_query).label("bm25_score"))
                 .filter(
                     RunbookChunk.search_tsv.isnot(None),
-                    RunbookChunk.source == "runbooks",
                     RunbookChunk.search_tsv.op("@@")(ts_query),
                 )
                 .order_by(desc("bm25_score"))
-                .limit(limit)
+                .limit(raw_limit)
                 .all()
             )
             for chunk, bm25_score in bm25_rows:
@@ -248,31 +284,33 @@ def find_similar_runbook_chunks(
 
     if not candidates:
         matches: List[Tuple[RunbookChunk, float]] = []
-        for chunk in db.query(RunbookChunk).filter(RunbookChunk.source == "runbooks").all():
+        for chunk in db.query(RunbookChunk).all():
             chunk_text = " ".join([chunk.title or "", chunk.content or ""]).strip()
             keyword_score = jaccard_similarity(query_tokens, _tokens(chunk_text))
             score = _hybrid_score(0.0, keyword_score)
-            score += _rerank_boost(query_text, chunk.title, chunk.content)
+            score += _rerank_boost(query_text, chunk.section_header or chunk.title, chunk.content)
             if score < min_score:
                 continue
             matches.append((chunk, score))
 
         matches.sort(key=lambda item: item[1], reverse=True)
+        matches = _dedup_by_section(matches)
         for chunk, score in matches[:limit]:
-            results.append({"chunk": chunk, "score": score})
+            results.append({"chunk": chunk, "score": score, "context": chunk.section_content or chunk.content})
         return results
 
     ranked: List[Tuple[RunbookChunk, float]] = []
     for entry in candidates.values():
         chunk = entry["chunk"]
         score = _hybrid_score(entry["vector_score"], entry["bm25_score"])
-        score += _rerank_boost(query_text, chunk.title, chunk.content)
+        score += _rerank_boost(query_text, chunk.section_header or chunk.title, chunk.content)
         if score < min_score:
             continue
         ranked.append((chunk, min(score, 1.0)))
 
     ranked.sort(key=lambda item: item[1], reverse=True)
+    ranked = _dedup_by_section(ranked)
     for chunk, score in ranked[:limit]:
-        results.append({"chunk": chunk, "score": score})
+        results.append({"chunk": chunk, "score": score, "context": chunk.section_content or chunk.content})
 
     return results

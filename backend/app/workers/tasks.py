@@ -19,6 +19,7 @@ from app.workers.celery_app import celery_app
 from app.database import SessionLocal
 from app.models.database import Alert, Incident, IncidentAction, SeverityLevel, IncidentStatus, ActionType
 from app.services.incident_similarity import ensure_incident_embedding
+from app.services.notion_connector import NotionSyncError, sync_notion_connector
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,13 @@ def process_alert(self, alert_id: int):
                 .order_by(Alert.alert_timestamp.desc())
                 .all()
             )
-            ensure_incident_embedding(db, incident, alerts)
+            try:
+                ensure_incident_embedding(db, incident, alerts)
+            except RuntimeError as emb_err:
+                logger.warning(
+                    f"Embedding unavailable for incident {incident.id}, "
+                    f"similarity search will use BM25 only: {emb_err}"
+                )
             db.commit()
 
         logger.info(f"Alert {alert_id} processed successfully, incident_id={incident_id}")
@@ -347,3 +354,28 @@ def group_alerts_into_incidents(db, alert: Alert) -> int:
         logger.error(f"Error grouping alert {alert.id} into incident: {str(e)}", exc_info=True)
         db.rollback()
         raise
+
+
+@celery_app.task(bind=True, max_retries=2)
+def sync_notion_connector_task(self, connector_id: str = "notion"):
+    db = SessionLocal()
+    try:
+        result = sync_notion_connector(db, connector_id=connector_id)
+        logger.info("Notion sync completed for connector %s", connector_id)
+        return result
+    except NotionSyncError as exc:
+        logger.error("Notion sync failed for connector %s: %s", connector_id, exc, exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {"status": "failed", "error": str(exc)}
+    except Exception as exc:
+        logger.error("Notion sync failed for connector %s: %s", connector_id, exc, exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise self.retry(exc=exc, countdown=2 ** self.request.retries)
+    finally:
+        db.close()

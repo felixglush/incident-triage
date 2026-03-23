@@ -6,11 +6,13 @@ from .database import (
     Incident,
     IncidentAction,
     RunbookChunk,
+    SourceDocument,
     SeverityLevel,
     IncidentStatus,
     ActionType,
     Connector,
     ConnectorStatus,
+    ConnectorSyncStatus,
 )
 
 __all__ = [
@@ -19,9 +21,11 @@ __all__ = [
     "Incident",
     "IncidentAction",
     "RunbookChunk",
+    "SourceDocument",
     "SeverityLevel",
     "IncidentStatus",
     "ActionType",
     "Connector",
     "ConnectorStatus",
+    "ConnectorSyncStatus",
 ]

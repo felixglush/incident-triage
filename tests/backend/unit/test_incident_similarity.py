@@ -1,0 +1,408 @@
+"""
+Unit tests for find_similar_runbook_chunks() — deduplication, context key,
+and limit inflation (Task 4).
+
+All tests use MagicMock for the DB session; no real DB required.
+"""
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.models import RunbookChunk
+from app.services.incident_similarity import find_similar_runbook_chunks
+
+
+def _make_chunk(
+    id: int,
+    source_document: str,
+    title: str,
+    content: str,
+    section_header: str | None = None,
+    section_content: str | None = None,
+    embedding=None,
+    search_tsv=None,
+) -> RunbookChunk:
+    chunk = RunbookChunk(
+        id=id,
+        source_document=source_document,
+        chunk_index=id,
+        title=title,
+        content=content,
+        source="runbooks",
+        section_header=section_header,
+        section_content=section_content,
+    )
+    chunk.embedding = embedding
+    chunk.search_tsv = search_tsv
+    return chunk
+
+
+# ---------------------------------------------------------------------------
+# Helpers to build a mock DB that returns controlled rows
+# ---------------------------------------------------------------------------
+
+def _mock_db_no_pgvector(chunks_with_scores):
+    """Return a MagicMock db whose query chain yields (chunk, bm25_score) pairs."""
+    db = MagicMock()
+    # Make every chained call return the mock itself until .all()
+    query_mock = MagicMock()
+    db.query.return_value = query_mock
+    query_mock.filter.return_value = query_mock
+    query_mock.order_by.return_value = query_mock
+    query_mock.limit.return_value = query_mock
+    query_mock.all.return_value = chunks_with_scores
+    return db
+
+
+# ---------------------------------------------------------------------------
+# Test 1: context key uses section_content when non-null
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_context_key_uses_section_content():
+    """result["context"] should equal chunk.section_content when it is non-null."""
+    section_text = "Full parent section text for the section."
+    chunk = _make_chunk(
+        id=1,
+        source_document="runbook-a.md",
+        title="Runbook A",
+        content="Sub-chunk content only.",
+        section_header="Section Header A",
+        section_content=section_text,
+    )
+
+    db = _mock_db_no_pgvector([(chunk, 0.5)])
+
+    with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
+        results = find_similar_runbook_chunks(
+            db=db,
+            query_embedding=[0.1] * 1024,
+            query_text="runbook section content",
+            limit=5,
+            min_score=0.0,
+        )
+
+    assert len(results) == 1
+    assert results[0]["context"] == section_text
+
+
+# ---------------------------------------------------------------------------
+# Test 2: context key falls back to chunk.content when section_content is None
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_context_key_falls_back_to_content_when_section_content_null():
+    """result["context"] should equal chunk.content when section_content is None."""
+    chunk = _make_chunk(
+        id=2,
+        source_document="legacy-runbook.md",
+        title="Legacy Runbook",
+        content="Legacy chunk content with no section.",
+        section_header=None,
+        section_content=None,
+    )
+
+    db = _mock_db_no_pgvector([(chunk, 0.5)])
+
+    with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
+        results = find_similar_runbook_chunks(
+            db=db,
+            query_embedding=[0.1] * 1024,
+            query_text="legacy runbook content",
+            limit=5,
+            min_score=0.0,
+        )
+
+    assert len(results) == 1
+    assert results[0]["context"] == chunk.content
+
+
+# ---------------------------------------------------------------------------
+# Test 3: deduplication collapses sibling chunks to one result
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_deduplication_collapses_siblings_to_one_result():
+    """Two chunks with the same (source_document, section_header) should collapse to one."""
+    section_header = "INC-2024-0156 — Redis OOM"
+    section_content = "Full section content shared by both siblings."
+
+    chunk_a = _make_chunk(
+        id=10,
+        source_document="auth-runbook.md",
+        title="Auth Runbook",
+        content="Description and root cause (~900 chars).",
+        section_header=section_header,
+        section_content=section_content,
+    )
+    chunk_b = _make_chunk(
+        id=11,
+        source_document="auth-runbook.md",
+        title="Auth Runbook",
+        content="Resolution steps 1-6 (~1100 chars).",
+        section_header=section_header,
+        section_content=section_content,
+    )
+
+    # Both siblings share the same dedup key; exactly one should survive
+    db = _mock_db_no_pgvector([(chunk_a, 0.3), (chunk_b, 0.7)])
+
+    with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
+        results = find_similar_runbook_chunks(
+            db=db,
+            query_embedding=[0.1] * 1024,
+            query_text="redis session store memory exhaustion fix",
+            limit=5,
+            min_score=0.0,
+        )
+
+    assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 4: deduplication limit is respected
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_deduplication_limit_respected():
+    """DB returns limit*3 raw candidates from 3 distinct sections; result is exactly limit=1."""
+    # We'll use limit=1 and 3 distinct sections (3 chunks), so after dedup we get 3 unique
+    # sections, then trim to limit=1.
+    chunks = [
+        _make_chunk(
+            id=i,
+            source_document=f"doc-{i}.md",
+            title=f"Doc {i}",
+            content=f"Content for doc {i}.",
+            section_header=f"Section {i}",
+            section_content=f"Full section {i} content.",
+        )
+        for i in range(3)
+    ]
+
+    db = _mock_db_no_pgvector([(c, 0.8 - i * 0.1) for i, c in enumerate(chunks)])
+
+    with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
+        results = find_similar_runbook_chunks(
+            db=db,
+            query_embedding=[0.1] * 1024,
+            query_text="doc content section",
+            limit=1,
+            min_score=0.0,
+        )
+
+    assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 5: legacy chunks (section_header=None) deduplicate by source_document alone
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_deduplication_legacy_null_section_header():
+    """Chunks with section_header=None should deduplicate by source_document alone."""
+    # Two legacy chunks from the same source_document (no section_header)
+    chunk_x = _make_chunk(
+        id=20,
+        source_document="old-runbook.md",
+        title="Old Runbook",
+        content="First legacy chunk.",
+        section_header=None,
+        section_content=None,
+    )
+    chunk_y = _make_chunk(
+        id=21,
+        source_document="old-runbook.md",
+        title="Old Runbook",
+        content="Second legacy chunk with higher score.",
+        section_header=None,
+        section_content=None,
+    )
+    # A third chunk from a different document
+    chunk_z = _make_chunk(
+        id=22,
+        source_document="other-runbook.md",
+        title="Other Runbook",
+        content="Chunk from a different document.",
+        section_header=None,
+        section_content=None,
+    )
+
+    db = _mock_db_no_pgvector([(chunk_x, 0.4), (chunk_y, 0.6), (chunk_z, 0.5)])
+
+    with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
+        results = find_similar_runbook_chunks(
+            db=db,
+            query_embedding=[0.1] * 1024,
+            query_text="legacy runbook chunk content",
+            limit=5,
+            min_score=0.0,
+        )
+
+    # chunk_x and chunk_y should collapse to one; chunk_z stays — 2 results total
+    assert len(results) == 2
+    surviving_docs = {r["chunk"].source_document for r in results}
+    assert "old-runbook.md" in surviving_docs
+    assert "other-runbook.md" in surviving_docs
+
+
+# ---------------------------------------------------------------------------
+# Test 6: Jaccard fallback path has context key and dedup
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_jaccard_fallback_context_key_and_dedup():
+    """In the Jaccard fallback (HAS_PGVECTOR=False, candidates dict is empty),
+    results must have 'context' key and deduplication must work."""
+    section_content = "Full section text for fallback test."
+    chunk_a = _make_chunk(
+        id=30,
+        source_document="fallback-runbook.md",
+        title="Fallback Runbook",
+        content="jaccard fallback content first chunk",
+        section_header="Fallback Section",
+        section_content=section_content,
+    )
+    chunk_b = _make_chunk(
+        id=31,
+        source_document="fallback-runbook.md",
+        title="Fallback Runbook",
+        content="jaccard fallback content second chunk",
+        section_header="Fallback Section",
+        section_content=section_content,
+    )
+
+    db = MagicMock()
+    # The Jaccard path calls db.query(RunbookChunk).filter(...).all()
+    query_mock = MagicMock()
+    db.query.return_value = query_mock
+    query_mock.filter.return_value = query_mock
+    query_mock.order_by.return_value = query_mock
+    query_mock.limit.return_value = query_mock
+    query_mock.all.return_value = [chunk_a, chunk_b]
+
+    with patch("app.services.incident_similarity.HAS_PGVECTOR", False):
+        # Also patch the bm25/vector paths to force Jaccard: ensure candidates stays empty
+        # by making every DB call return empty for the vector/bm25 paths but populated for
+        # the Jaccard path. We do this by controlling what .all() returns on different calls.
+        call_count = {"n": 0}
+        original_all = query_mock.all
+
+        def side_effect_all():
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # First call: BM25 path — return empty to force Jaccard fallback
+                return []
+            # Second call: Jaccard path
+            return [chunk_a, chunk_b]
+
+        query_mock.all.side_effect = side_effect_all
+
+        results = find_similar_runbook_chunks(
+            db=db,
+            query_embedding=[0.1] * 1024,
+            query_text="jaccard fallback content chunk",
+            limit=5,
+            min_score=0.0,
+        )
+
+    # All results must have "context" key
+    for r in results:
+        assert "context" in r
+
+    # Siblings should have been deduplicated to one result
+    assert len(results) == 1
+    assert results[0]["context"] == section_content
+
+
+# ---------------------------------------------------------------------------
+# Test 7: ensure_incident_embedding uses mode="document"
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_ensure_incident_embedding_uses_document_mode():
+    """ensure_incident_embedding must call embed_text with mode='document'."""
+    from unittest.mock import patch, MagicMock
+    from app.services.incident_similarity import ensure_incident_embedding
+    from app.models import Incident
+
+    incident = MagicMock(spec=Incident)
+    incident.title = "Redis down"
+    incident.summary = None
+    incident.affected_services = []
+
+    db = MagicMock()
+    db.add = MagicMock()
+
+    with patch("app.services.incident_similarity.embed_text",
+               return_value=[0.1] * 1024) as mock_embed:
+        ensure_incident_embedding(db, incident, [])
+
+    mock_embed.assert_called_once()
+    args, kwargs = mock_embed.call_args
+    assert kwargs.get("mode") == "document" or (len(args) > 1 and args[1] == "document"), \
+        "ensure_incident_embedding must use mode='document'"
+
+
+# ---------------------------------------------------------------------------
+# Test 8: None query_embedding skips vector path, BM25 still runs
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_find_similar_runbook_chunks_none_embedding_skips_vector_path():
+    """When query_embedding is None, l2_distance must never be called — BM25 runs instead."""
+    section_content = "Full section content for BM25 fallback test."
+    chunk = _make_chunk(
+        id=50,
+        source_document="bm25-runbook.md",
+        title="BM25 Runbook",
+        content="redis memory exhaustion resolution steps",
+        section_header="Redis OOM",
+        section_content=section_content,
+    )
+
+    db = _mock_db_no_pgvector([(chunk, 0.8)])
+
+    # HAS_PGVECTOR=True so the condition is exercised. Without the guard
+    # (`HAS_PGVECTOR and query_embedding is not None`), this would crash trying
+    # to call l2_distance(None). With the guard, the pgvector block is skipped
+    # and BM25 runs normally.
+    with patch("app.services.incident_similarity.HAS_PGVECTOR", True):
+        results = find_similar_runbook_chunks(
+            db=db,
+            query_embedding=None,
+            query_text="redis memory exhaustion",
+            limit=5,
+            min_score=0.0,
+        )
+
+    assert len(results) == 1
+    assert results[0]["context"] == section_content
+
+
+# ---------------------------------------------------------------------------
+# Test 9: runbook search route passes None to find_similar_runbook_chunks on embed failure
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.no_embed_patch
+def test_runbook_search_embedding_failure_falls_back_to_bm25():
+    """When embed_text raises in /runbooks/search, route passes None to find_similar_runbook_chunks."""
+    from unittest.mock import patch
+    from app.api.runbooks import search_runbooks
+
+    mock_db = MagicMock()
+
+    with patch("app.api.runbooks.embed_text",
+               side_effect=RuntimeError("ML service embedding call failed")), \
+         patch("app.api.runbooks.find_similar_runbook_chunks",
+               return_value=[]) as mock_find:
+
+        search_runbooks(q="redis memory exhaustion", limit=5, db=mock_db)
+
+    assert mock_find.called
+    actual_embedding = mock_find.call_args[0][1]
+    assert actual_embedding is None, \
+        f"Expected query_embedding=None when embed_text fails, got {actual_embedding!r}"

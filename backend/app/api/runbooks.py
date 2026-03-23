@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from app.database import get_db
 from app.models import RunbookChunk
 from app.services.embeddings import embed_text
-from app.services.incident_similarity import ensure_runbook_embeddings, find_similar_runbook_chunks
+from app.services.incident_similarity import find_similar_runbook_chunks
 
 router = APIRouter()
 
@@ -55,10 +56,17 @@ def build_runbook_index(chunks: list[RunbookChunk]) -> list[dict]:
 
 
 @router.get("")
-def list_runbooks(limit: int = 100, offset: int = 0, db: Session = Depends(get_db)):
+def list_runbooks(
+    limit: int = 100,
+    offset: int = 0,
+    source: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(RunbookChunk)
+    if source:
+        query = query.filter(RunbookChunk.source == source)
     chunks = (
-        db.query(RunbookChunk)
-        .filter(RunbookChunk.source == "runbooks")
+        query
         .order_by(RunbookChunk.source_document.asc(), RunbookChunk.chunk_index.asc())
         .all()
     )
@@ -78,8 +86,10 @@ def search_runbooks(
     limit: int = Query(5, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
-    ensure_runbook_embeddings(db)
-    query_embedding = embed_text(q)
+    try:
+        query_embedding = embed_text(q, mode="query")
+    except RuntimeError:
+        query_embedding = None
     matches = find_similar_runbook_chunks(db, query_embedding, q, limit=limit)
     items = []
     for match in matches:
