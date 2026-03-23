@@ -224,7 +224,7 @@ class Incident(Base):
 
     # Embedding for similarity search
     if HAS_PGVECTOR:
-        incident_embedding = Column(Vector(384))
+        incident_embedding = Column(Vector(1024))
     else:
         incident_embedding = Column(JSONB)
 
@@ -353,8 +353,8 @@ class RunbookChunk(Base):
     - Queried by semantic similarity, not by incident ID
 
     Design decisions:
-    - Embedding dimension: 384 (all-MiniLM-L6-v2) or 768 (BERT)
-    - Uses pgvector (Vector(384)) if available, otherwise JSONB for compatibility
+    - Embedding dimension: 1024 (Qwen3-Embedding-0.6B)
+    - Uses pgvector (Vector(1024)) if available, otherwise JSONB for compatibility
     - source_document stores filename for citation (no FK to other table)
     - chunk_index allows proper ordering of chunks within a document
     - Unique constraint on (source_document, chunk_index) prevents duplicate chunks
@@ -393,9 +393,9 @@ class RunbookChunk(Base):
     search_tsv = Column(TSVECTOR)
 
     # Vector embedding for similarity search
-    # Using 384 dimensions for all-MiniLM-L6-v2 model
+    # Using 1024 dimensions for Qwen3-Embedding-0.6B model
     if HAS_PGVECTOR:
-        embedding = Column(Vector(384))
+        embedding = Column(Vector(1024))
     else:
         embedding = Column(JSONB)  # Fallback to JSONB
 

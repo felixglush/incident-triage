@@ -5,7 +5,7 @@ from typing import Optional
 from app.database import get_db
 from app.models import RunbookChunk
 from app.services.embeddings import embed_text
-from app.services.incident_similarity import ensure_runbook_embeddings, find_similar_runbook_chunks
+from app.services.incident_similarity import find_similar_runbook_chunks
 
 router = APIRouter()
 
@@ -86,8 +86,10 @@ def search_runbooks(
     limit: int = Query(5, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
-    ensure_runbook_embeddings(db)
-    query_embedding = embed_text(q)
+    try:
+        query_embedding = embed_text(q, mode="query")
+    except RuntimeError:
+        query_embedding = None
     matches = find_similar_runbook_chunks(db, query_embedding, q, limit=limit)
     items = []
     for match in matches:

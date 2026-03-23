@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 
 from app.models import Alert, Incident, SeverityLevel
+from app.services.embeddings import embed_text
 from app.services.incident_similarity import (
     build_incident_text,
     ensure_incident_embedding,
@@ -145,9 +146,13 @@ def summarize_incident(
     )
 
     query_text = build_incident_text(incident, alerts, include_summary=False)
+    try:
+        query_embedding = embed_text(query_text, mode="query")
+    except RuntimeError:
+        query_embedding = None
     runbook_chunks = find_similar_runbook_chunks(
         db,
-        incident.incident_embedding,
+        query_embedding,
         query_text,
         limit=limit_runbook,
     )

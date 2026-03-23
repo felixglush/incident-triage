@@ -1,362 +1,51 @@
 """
-Deterministic embeddings for incident similarity.
+Embedding client for OpsRelay.
 
-Uses hashed bag-of-words vectors to avoid external model dependencies.
+Calls the ML service /embed endpoint (Qwen3-Embedding-0.6B).
+Retains _tokens and jaccard_similarity for BM25 keyword scoring in incident_similarity.py.
 """
 from __future__ import annotations
 
-import hashlib
-import math
+import os
 import re
 from typing import Iterable, List
 
-EMBEDDING_DIM = 384
+import requests as _requests
+
+EMBEDDING_DIM = 1024
+EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "8"))
+EMBED_TIMEOUT = int(os.getenv("EMBED_TIMEOUT", "60"))
+ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8001")
+
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
 _STOPWORDS = {
-    "a",
-    "about",
-    "above",
-    "across",
-    "after",
-    "afterwards",
-    "again",
-    "against",
-    "all",
-    "almost",
-    "alone",
-    "along",
-    "already",
-    "also",
-    "although",
-    "always",
-    "am",
-    "among",
-    "amongst",
-    "amoungst",
-    "amount",
-    "an",
-    "and",
-    "another",
-    "any",
-    "anyhow",
-    "anyone",
-    "anything",
-    "anyway",
-    "anywhere",
-    "are",
-    "around",
-    "as",
-    "at",
-    "back",
-    "be",
-    "became",
-    "because",
-    "become",
-    "becomes",
-    "becoming",
-    "been",
-    "before",
-    "beforehand",
-    "behind",
-    "being",
-    "below",
-    "beside",
-    "besides",
-    "between",
-    "beyond",
-    "bill",
-    "both",
-    "bottom",
-    "but",
-    "by",
-    "call",
-    "can",
-    "cannot",
-    "cant",
-    "co",
-    "con",
-    "could",
-    "couldnt",
-    "cry",
-    "de",
-    "describe",
-    "detail",
-    "do",
-    "done",
-    "down",
-    "due",
-    "during",
-    "each",
-    "eg",
-    "eight",
-    "either",
-    "eleven",
-    "else",
-    "elsewhere",
-    "empty",
-    "enough",
-    "etc",
-    "even",
-    "ever",
-    "every",
-    "everyone",
-    "everything",
-    "everywhere",
-    "except",
-    "few",
-    "fifteen",
-    "fify",
-    "fill",
-    "find",
-    "fire",
-    "first",
-    "five",
-    "for",
-    "former",
-    "formerly",
-    "forty",
-    "found",
-    "four",
-    "from",
-    "front",
-    "full",
-    "further",
-    "get",
-    "give",
-    "go",
-    "had",
-    "has",
-    "hasnt",
-    "have",
-    "he",
-    "hence",
-    "her",
-    "here",
-    "hereafter",
-    "hereby",
-    "herein",
-    "hereupon",
-    "hers",
-    "herself",
-    "him",
-    "himself",
-    "his",
-    "how",
-    "however",
-    "hundred",
-    "i",
-    "ie",
-    "if",
-    "in",
-    "into",
-    "is",
-    "it",
-    "its",
-    "itself",
-    "just",
-    "keep",
-    "last",
-    "latter",
-    "latterly",
-    "least",
-    "less",
-    "ltd",
-    "made",
-    "many",
-    "may",
-    "me",
-    "meanwhile",
-    "might",
-    "mill",
-    "mine",
-    "more",
-    "moreover",
-    "most",
-    "mostly",
-    "move",
-    "much",
-    "must",
-    "my",
-    "myself",
-    "name",
-    "namely",
-    "neither",
-    "never",
-    "nevertheless",
-    "next",
-    "nine",
-    "no",
-    "nobody",
-    "none",
-    "noone",
-    "nor",
-    "not",
-    "nothing",
-    "now",
-    "nowhere",
-    "of",
-    "off",
-    "often",
-    "on",
-    "once",
-    "one",
-    "only",
-    "onto",
-    "or",
-    "other",
-    "others",
-    "otherwise",
-    "our",
-    "ours",
-    "ourselves",
-    "out",
-    "over",
-    "own",
-    "part",
-    "per",
-    "perhaps",
-    "please",
-    "put",
-    "rather",
-    "re",
-    "same",
-    "see",
-    "seem",
-    "seemed",
-    "seeming",
-    "seems",
-    "serious",
-    "several",
-    "she",
-    "should",
-    "show",
-    "side",
-    "since",
-    "sincere",
-    "six",
-    "sixty",
-    "so",
-    "some",
-    "somehow",
-    "someone",
-    "something",
-    "sometime",
-    "sometimes",
-    "somewhere",
-    "still",
-    "such",
-    "take",
-    "ten",
-    "than",
-    "that",
-    "the",
-    "their",
-    "them",
-    "themselves",
-    "then",
-    "thence",
-    "there",
-    "thereafter",
-    "thereby",
-    "therefore",
-    "therein",
-    "thereupon",
-    "these",
-    "they",
-    "thick",
-    "thin",
-    "third",
-    "this",
-    "those",
-    "though",
-    "three",
-    "through",
-    "throughout",
-    "thru",
-    "thus",
-    "to",
-    "together",
-    "too",
-    "top",
-    "toward",
-    "towards",
-    "twelve",
-    "twenty",
-    "two",
-    "un",
-    "under",
-    "until",
-    "up",
-    "upon",
-    "us",
-    "very",
-    "via",
-    "was",
-    "we",
-    "well",
-    "were",
-    "what",
-    "whatever",
-    "when",
-    "whence",
-    "whenever",
-    "where",
-    "whereafter",
-    "whereas",
-    "whereby",
-    "wherein",
-    "whereupon",
-    "wherever",
-    "whether",
-    "which",
-    "while",
-    "whither",
-    "who",
-    "whoever",
-    "whole",
-    "whom",
-    "whose",
-    "why",
-    "will",
-    "with",
-    "within",
-    "without",
-    "would",
-    "yet",
-    "you",
-    "your",
-    "yours",
-    "yourself",
-    "yourselves",
+    "a", "about", "above", "across", "after", "again", "against", "all",
+    "almost", "alone", "along", "already", "also", "although", "always", "am",
+    "among", "an", "and", "another", "any", "are", "around", "as", "at",
+    "back", "be", "became", "because", "been", "before", "being", "between",
+    "but", "by", "can", "cannot", "could", "do", "done", "down", "each",
+    "even", "every", "few", "for", "from", "get", "give", "go", "had", "has",
+    "have", "he", "her", "here", "him", "his", "how", "i", "if", "in",
+    "into", "is", "it", "its", "just", "keep", "last", "less", "made",
+    "many", "may", "me", "might", "more", "most", "move", "much", "must",
+    "my", "neither", "never", "next", "no", "nobody", "none", "nor", "not",
+    "nothing", "now", "of", "off", "often", "on", "once", "one", "only",
+    "or", "other", "our", "out", "over", "own", "per", "please", "put",
+    "rather", "re", "same", "see", "seem", "seems", "several", "she",
+    "should", "since", "so", "some", "still", "such", "take", "than", "that",
+    "the", "their", "them", "then", "there", "these", "they", "this",
+    "those", "though", "through", "thus", "to", "too", "toward", "two",
+    "un", "under", "until", "up", "upon", "us", "very", "via", "was", "we",
+    "well", "were", "what", "when", "where", "whether", "which", "while",
+    "who", "whom", "why", "will", "with", "within", "without", "would",
+    "yet", "you", "your",
 }
 
 
 def _tokens(text: str) -> List[str]:
     if not text:
         return []
-    return [token for token in _TOKEN_RE.findall(text.lower()) if token not in _STOPWORDS]
-
-
-def _hash_token(token: str, dim: int) -> tuple[int, int]:
-    digest = hashlib.md5(token.encode("utf-8")).hexdigest()
-    idx = int(digest[:8], 16) % dim
-    sign = 1 if int(digest[8:9], 16) % 2 == 0 else -1
-    return idx, sign
-
-
-def embed_text(text: str, dim: int = EMBEDDING_DIM) -> List[float]:
-    """
-    Convert text into a deterministic unit-length embedding.
-    """
-    vec = [0.0] * dim
-    for token in _tokens(text):
-        idx, sign = _hash_token(token, dim)
-        vec[idx] += float(sign)
-
-    norm = math.sqrt(sum(v * v for v in vec))
-    if norm == 0:
-        return vec
-    return [v / norm for v in vec]
+    return [t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS]
 
 
 def jaccard_similarity(tokens_a: Iterable[str], tokens_b: Iterable[str]) -> float:
@@ -365,3 +54,30 @@ def jaccard_similarity(tokens_a: Iterable[str], tokens_b: Iterable[str]) -> floa
     if not set_a and not set_b:
         return 0.0
     return len(set_a & set_b) / float(len(set_a | set_b))
+
+
+def embed_texts(texts: List[str], mode: str = "document") -> List[List[float]]:
+    """Batch embed via ML service. mode='document' for ingestion, 'query' for retrieval."""
+    if not texts:
+        return []
+    results: List[List[float]] = []
+    for i in range(0, len(texts), EMBED_BATCH_SIZE):
+        batch = texts[i : i + EMBED_BATCH_SIZE]
+        try:
+            response = _requests.post(
+                f"{ML_SERVICE_URL}/embed",
+                json={"texts": batch, "mode": mode},
+                timeout=EMBED_TIMEOUT,
+            )
+            response.raise_for_status()
+        except _requests.RequestException as exc:
+            raise RuntimeError(f"ML service embedding call failed: {exc}") from exc
+        results.extend(response.json()["embeddings"])
+    return results
+
+
+def embed_text(text: str, mode: str = "document") -> List[float]:
+    """Embed a single text. Returns zero vector for empty input."""
+    if not text or not text.strip():
+        return [0.0] * EMBEDDING_DIM
+    return embed_texts([text], mode=mode)[0]

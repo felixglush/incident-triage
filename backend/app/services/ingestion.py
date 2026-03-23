@@ -10,7 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import RunbookChunk, SourceDocument
-from app.services.embeddings import embed_text
+from app.services.embeddings import embed_text, embed_texts
 
 
 @dataclass
@@ -132,8 +132,10 @@ def chunk_markdown_structured(
       - title:           document H1 title
       - chunk_index:     global sequential index across all sections
 
-    Flat-doc fallback: if no ## or ### headers exist, the entire document is
-    treated as one section (section_content = full document).
+    Flat-doc fallback: if no ## or ### headers exist, the document is split
+    by paragraph into sub-chunks (same max_chars/overlap logic). Each chunk's
+    section_content equals its own content (not the full document), keeping
+    LLM context bounded.
     """
     if not text or not text.strip():
         return []
@@ -148,7 +150,27 @@ def chunk_markdown_structured(
     if has_headers:
         sections = _extract_sections(text, title)
     else:
-        sections = [(title, text.strip())]
+        chunks: List[DocumentChunk] = []
+        sub_chunks = _split_section(text.strip(), max_chars, overlap)
+        for sub_content in sub_chunks:
+            if not sub_content:  # guard against _split_section('') edge case
+                continue
+            chunks.append(
+                DocumentChunk(
+                    content=sub_content,
+                    chunk_index=len(chunks),
+                    title=title,
+                    section_header=title,
+                    section_content=sub_content,
+                )
+            )
+        if len(text.strip()) > 6000:
+            logging.getLogger(__name__).warning(
+                "Flat document (%d chars) has no ## headers — "
+                "consider adding section headers for better RAG retrieval",
+                len(text.strip()),
+            )
+        return chunks
 
     chunks: List[DocumentChunk] = []
 
@@ -297,31 +319,34 @@ def upsert_markdown_document(
     ).delete()
 
     inserted = 0
-    for chunk in chunks:
-        metadata = {
-            "tags": tags,
-            "source": source,
-            "version_hash": version_hash,
-            "title": chunk.title,
-            **extra_metadata,
-        }
-        search_text = " ".join(filter(None, [chunk.section_header, chunk.title, chunk.content])).strip()
-        db.add(
-            RunbookChunk(
-                source_document=source_document,
-                chunk_index=chunk.chunk_index,
-                title=chunk.title,
-                content=chunk.content,
-                section_header=chunk.section_header,      # NEW
-                section_content=chunk.section_content,    # NEW
-                search_tsv=func.to_tsvector("english", search_text),
-                embedding=embed_text(chunk.content),
-                doc_metadata=metadata,
-                source=source,
-                source_uri=source_uri,
+    if chunks:
+        texts = [chunk.content for chunk in chunks]
+        embeddings = embed_texts(texts, mode="document")
+        for chunk, embedding in zip(chunks, embeddings):
+            metadata = {
+                "tags": tags,
+                "source": source,
+                "version_hash": version_hash,
+                "title": chunk.title,
+                **extra_metadata,
+            }
+            search_text = " ".join(filter(None, [chunk.section_header, chunk.title, chunk.content])).strip()
+            db.add(
+                RunbookChunk(
+                    source_document=source_document,
+                    chunk_index=chunk.chunk_index,
+                    title=chunk.title,
+                    content=chunk.content,
+                    section_header=chunk.section_header,
+                    section_content=chunk.section_content,
+                    search_tsv=func.to_tsvector("english", search_text),
+                    embedding=embedding,
+                    doc_metadata=metadata,
+                    source=source,
+                    source_uri=source_uri,
+                )
             )
-        )
-        inserted += 1
+            inserted += 1
 
     return inserted
 

@@ -479,3 +479,77 @@ class TestIncidentGroupingEdgeCases:
 
         # Both should be grouped to same incident
         assert incident_id_1 == incident_id_2
+
+
+# ---------------------------------------------------------------------------
+# Test: embedding failure does not cause Celery retry
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.celery
+@pytest.mark.database
+@pytest.mark.no_embed_patch
+class TestEmbeddingFailureSoftFail:
+    """Embedding errors must not trigger Celery retries."""
+
+    @mock.patch("app.workers.tasks.requests.post")
+    def test_process_alert_embedding_failure_does_not_retry(
+        self, mock_post, db_session, celery_app
+    ):
+        """RuntimeError from ensure_incident_embedding must not cause a retry.
+
+        The alert pipeline should complete successfully even when the ML
+        service is unavailable for embedding, leaving incident_embedding=None.
+        """
+        from tests.backend.fixtures.factories import AlertFactory, configure_factories
+
+        configure_factories(db_session)
+
+        mock_post.side_effect = [
+            mock.Mock(
+                status_code=200,
+                json=lambda: {
+                    "severity": "high",
+                    "team": "infrastructure",
+                    "confidence": 0.85,
+                },
+            ),
+            mock.Mock(
+                status_code=200,
+                json=lambda: {
+                    "service_name": "redis",
+                    "environment": "production",
+                    "region": "us-east-1",
+                    "error_code": None,
+                },
+            ),
+        ]
+
+        alert = AlertFactory(
+            title="Redis OOM",
+            message="Redis out of memory in production",
+            severity=None,
+            predicted_team=None,
+            confidence_score=None,
+            service_name=None,
+        )
+        db_session.commit()
+
+        with mock.patch(
+            "app.workers.tasks.ensure_incident_embedding",
+            side_effect=RuntimeError("ML service unavailable"),
+        ):
+            result = process_alert(alert.id)
+
+        assert result["status"] == "success"
+        assert result["incident_id"] is not None
+
+        from app.models import Incident
+
+        incident = (
+            db_session.query(Incident)
+            .filter(Incident.id == result["incident_id"])
+            .first()
+        )
+        assert incident is not None
+        assert incident.incident_embedding is None

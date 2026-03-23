@@ -5,14 +5,28 @@ Tests the classification and entity extraction endpoints without requiring
 the actual NER model to be loaded.
 """
 import pytest
+import numpy as np
 from fastapi.testclient import TestClient
 from unittest import mock
+from unittest.mock import MagicMock, patch
 
 # Mock the transformers pipeline before importing the app
 with mock.patch('ml.inference_server.pipeline'):
     from ml.inference_server import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def mock_embedding_model():
+    """Prevent Qwen3-0.6B from loading during tests."""
+    fake_model = MagicMock()
+    # encode() returns a numpy array of shape (n_texts, 1024)
+    fake_model.encode = MagicMock(
+        side_effect=lambda texts, **kw: np.ones((len(texts), 1024), dtype=float)
+    )
+    with patch("ml.inference_server.embedding_model", fake_model):
+        yield fake_model
 
 
 class TestHealthEndpoint:
@@ -26,6 +40,12 @@ class TestHealthEndpoint:
         data = response.json()
         assert data["status"] == "healthy"
         assert "ner_model_loaded" in data
+        assert "embedding_model_loaded" in data
+
+    def test_health_reports_embedding_model(self):
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert "embedding_model_loaded" in resp.json()
 
 
 class TestClassificationEndpoint:
@@ -416,3 +436,44 @@ class TestEdgeCases:
         )
 
         assert response.status_code == 422
+
+
+class TestEmbedEndpoint:
+    """Test /embed endpoint."""
+
+    @pytest.fixture
+    def client(self):
+        return TestClient(app)
+
+    def test_embed_document_mode(self):
+        resp = client.post("/embed", json={"texts": ["check redis connection"], "mode": "document"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "embeddings" in data
+        assert len(data["embeddings"]) == 1
+        assert len(data["embeddings"][0]) == 1024
+
+    def test_embed_query_mode_applies_prefix(self, mock_embedding_model):
+        """Query mode should call encode with the instruction prefix prepended."""
+        resp = client.post("/embed", json={"texts": ["redis is down"], "mode": "query"})
+        assert resp.status_code == 200
+        # Verify the model was called with a prefixed string
+        call_args = mock_embedding_model.encode.call_args[0][0]
+        assert call_args[0].startswith("Instruct:")
+
+    def test_embed_batch(self):
+        texts = ["doc one", "doc two", "doc three"]
+        resp = client.post("/embed", json={"texts": texts, "mode": "document"})
+        assert resp.status_code == 200
+        assert len(resp.json()["embeddings"]) == 3
+
+    def test_embed_empty_list(self):
+        resp = client.post("/embed", json={"texts": [], "mode": "document"})
+        assert resp.status_code == 200
+        assert resp.json()["embeddings"] == []
+
+    def test_embed_returns_503_when_model_not_loaded(self, client):
+        """When embedding model failed to load, /embed returns 503."""
+        with patch("ml.inference_server.embedding_model", None):
+            resp = client.post("/embed", json={"texts": ["test"], "mode": "document"})
+        assert resp.status_code == 503
